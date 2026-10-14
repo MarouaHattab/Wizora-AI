@@ -20,6 +20,7 @@ class SummaryGenState(TypedDict):
     Main_Points: str
 
 class QuestionAnswerState(TypedDict):
+    asset_id: str
     messages: list[BaseMessage]
     relevant_text: list[Document]
     on_topic: str

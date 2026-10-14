@@ -2,13 +2,13 @@ import os
 import sys
 sys.path.append(os.path.dirname(os.path.dirname( os.path.abspath(__file__))))
 
-from helper import get_settings, text_splitter
-from llm import LLMProviderFactory, EmbeddingProviderFactory
+from helper import get_settings
+from helper.asset_index import ensure_asset_index
+from llm import LLMProviderFactory
 
 from chains import GradeQuestion, GradeQuestionPrompt
 from .GraphState import QuestionAnswerState
 
-from langchain_community.vectorstores import Chroma
 from langchain_core.messages import AIMessage
 from langgraph.graph import StateGraph, START, END
 from langgraph.checkpoint.memory import MemorySaver
@@ -25,20 +25,8 @@ def question_classifier(state: QuestionAnswerState) -> QuestionAnswerState:
     if "conversation_history" not in state:
         state["conversation_history"] = []
 
-    embedding = EmbeddingProviderFactory(config).create(config.EMBEDDING_MODEL_PROVIDER)
-
-    texts = text_splitter(
-        state["context"], 
-        chunk_size=int(os.getenv("CHUNK_SIZE", 350)), 
-        chunk_overlap=int(os.getenv("CHUNK_OVERLAP", 50))
-    )
-
-    retriever = Chroma.from_texts(
-        texts, 
-        embedding, 
-    ).as_retriever(search_type="mmr", search_kwargs={"k": 5})
-
-    state["relevant_text"] = retriever.invoke(question) 
+    asset_index = ensure_asset_index(state["asset_id"], state["context"], config)
+    state["relevant_text"] = asset_index.retrieve(question)
 
     docs = "\n".join([doc.page_content for doc in state["relevant_text"]])
     llm = LLMProviderFactory(config).create(

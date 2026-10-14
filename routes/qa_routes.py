@@ -41,6 +41,7 @@ async def start_qa_session_stream(asset_id: str = Body(..., embed=True), initial
         raise HTTPException(status_code=500, detail=f"Failed to read context file: {str(e)}")
 
     initial_state = QuestionAnswerState(
+        asset_id=asset_id,
         messages=[HumanMessage(content=initial_question)],
         relevant_text=[],
         on_topic="",
