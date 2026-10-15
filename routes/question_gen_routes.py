@@ -3,9 +3,12 @@ import os
 from fastapi import APIRouter, HTTPException, Body
 from typing import Literal
 from langgraph.types import Command
+from langchain_core.exceptions import OutputParserException
+from pydantic import ValidationError
 
 from controllers.GraphState import QuestionGenState
 from controllers.QuestionGenGraphController import qg_graph
+from chains.contracts import InsufficientSourceError, StructuredOutputError
 from helper.session_review import acquire_session, accept_feedback, review_revision, session_status
 
 router = APIRouter()
@@ -22,7 +25,7 @@ def question_response(thread_id, snapshot):
         return {"thread_id": thread_id, "status": status, "final_state": current_graph_state}
     if status != "interrupted_for_feedback":
         raise HTTPException(status_code=500, detail="Question generation did not reach a review or completion")
-    return {
+    response = {
         "thread_id": thread_id,
         "status": status,
         "review_id": review_revision(snapshot),
@@ -35,6 +38,10 @@ def question_response(thread_id, snapshot):
         },
         "current_state": current_graph_state,
     }
+    history = current_graph_state.get("history", [])
+    if history and isinstance(history[-1], dict) and history[-1].get("status") == "unchanged":
+        response["data_for_feedback"]["revision_notice"] = history[-1]["reason"]
+    return response
 
 
 @router.post("/start_session")
@@ -63,6 +70,10 @@ async def start_question_generation_session(
         return question_response(thread_id, await qg_graph.aget_state(config))
     except HTTPException:
         raise
+    except InsufficientSourceError as exc:
+        raise HTTPException(status_code=422, detail={"status": "insufficient_source", "reason": exc.reason}) from None
+    except (StructuredOutputError, ValidationError, OutputParserException):
+        raise HTTPException(status_code=502, detail="The question provider returned an invalid structured result") from None
     except Exception:
         raise HTTPException(status_code=500, detail="Error invoking question generation graph")
     finally:
@@ -84,6 +95,8 @@ async def provide_feedback_to_question_generation(
         return question_response(thread_id, await qg_graph.aget_state(config))
     except HTTPException:
         raise
+    except (StructuredOutputError, ValidationError, OutputParserException):
+        raise HTTPException(status_code=502, detail="The question provider returned an invalid structured result") from None
     except Exception:
         raise HTTPException(status_code=500, detail="Error resuming question generation graph")
     finally:

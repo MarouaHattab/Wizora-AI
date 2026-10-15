@@ -1,125 +1,107 @@
+import json
 import os
 import sys
-sys.path.append(os.path.dirname(os.path.dirname( os.path.abspath(__file__))))
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from helper import get_settings
 from llm import LLMProviderFactory
 from chains import QuestionGenPrompt, QuestionRefinerPrompt, QuestionRewriterPrompt
-from chains import Question, Feedback
-
+from chains import Question, Feedback, GenerationResult, RevisionResult
+from chains.contracts import InsufficientSourceError, StructuredOutputError, requested_question, structured_output
 from .GraphState import QuestionGenState
-
 from langgraph.graph import StateGraph, START, END
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.types import interrupt
 
 config = get_settings()
 
+
+def current_question(state):
+    return structured_output(Question, {
+        key: state[key] for key in ("question", "question_type", "options", "answer", "explanation")
+    })
+
+
 def QuestionGenerator(state: QuestionGenState) -> QuestionGenState:
-
+    if not state["context"].strip():
+        raise InsufficientSourceError("The source contains no educational material.")
     llm = LLMProviderFactory(config).create(
-        config.QUESTION_GENERATER_PROVIDER, 
-        config.QUESTION_GENERATER_MODEL_ID, 
-        config.QUESTION_GENERATER_TEMPERATURE
+        config.QUESTION_GENERATER_PROVIDER,
+        config.QUESTION_GENERATER_MODEL_ID,
+        config.QUESTION_GENERATER_TEMPERATURE,
     )
+    chain = QuestionGenPrompt | llm.with_structured_output(GenerationResult)
+    result = structured_output(GenerationResult, chain.invoke({
+        "context": state["context"], "question_type": state["question_type"]
+    }))
+    if result.status == "insufficient_source":
+        raise InsufficientSourceError(result.reason)
+    question = requested_question(result.question, state["question_type"])
+    return {**state, **question.model_dump(), "history": state.get("history") or []}
 
-    llm = llm.with_structured_output(Question)
-    question_generation_llm = QuestionGenPrompt | llm
-    response = question_generation_llm.invoke({"context": state["context"], "question_type": state["question_type"]})
-
-    state["question"] = response.question
-    state["options"] = response.options
-    state["answer"] = response.answer
-    state["explanation"] = response.explanation
-    
-    if state.get("history") is None:
-        state["history"] = []
-
-    return state
 
 def HumanFeedback(state: QuestionGenState) -> QuestionGenState:
-    
-    human_feedback = interrupt(
-        {
-            "gernerated_question": state["question"],
-            "options": state["options"],
-            "answer": state["answer"],
-            "explanation": state["explanation"],
-            "message": "Provide feedback or type 'auto' to automatically generate a new question or 'save' to finish"
-        }
-    )
-    
+    human_feedback = interrupt({
+        "gernerated_question": state["question"],
+        "options": state["options"],
+        "answer": state["answer"],
+        "explanation": state["explanation"],
+        "message": "Provide feedback or type 'auto' to automatically generate a new question or 'save' to finish",
+    })
     state["feedback"] = human_feedback
-
     return state
-    
+
+
 def Router(state: QuestionGenState) -> str:
     if state["feedback"].strip().casefold() == "save":
         return "save"
     elif state["feedback"].strip().casefold() == "auto":
         return "auto"
-    else:
-        return "feedback"
-    
-def QuestionRefiner(state: QuestionGenState) -> QuestionGenState:
+    return "feedback"
 
+
+def QuestionRefiner(state: QuestionGenState) -> QuestionGenState:
+    question = current_question(state)
     llm = LLMProviderFactory(config).create(
         config.QUESTION_REFINER_PROVIDER,
         config.QUESTION_REFINER_MODEL_ID,
-        config.QUESTION_REFINER_TEMPERATURE
+        config.QUESTION_REFINER_TEMPERATURE,
     )
+    chain = QuestionRefinerPrompt | llm.with_structured_output(Feedback)
+    response = structured_output(Feedback, chain.invoke({
+        "context": state["context"],
+        **question.model_dump(),
+        "options": json.dumps(question.options, ensure_ascii=False),
+    }))
+    return {**state, "feedback": response.model_dump_json()}
 
-    llm = llm.with_structured_output(Feedback)
-    question_refiner_llm = QuestionRefinerPrompt | llm
-    response = question_refiner_llm.invoke({"context": state["context"], "question_type": state["question_type"], "question": state["question"], "options": state["options"], "answer": state["answer"], "explanation": state["explanation"]})
-
-    state["feedback"] = response.feedback
-    return state
 
 def QuestionRewriter(state: QuestionGenState) -> QuestionGenState:
-
+    draft = current_question(state)
+    prior_revisions = [entry for entry in state.get("history", []) if isinstance(entry, dict)][-3:]
     llm = LLMProviderFactory(config).create(
         config.QUESTION_REWRITER_PROVIDER,
         config.QUESTION_REWRITER_MODEL_ID,
-        config.QUESTION_REWRITER_TEMPERATURE
+        config.QUESTION_REWRITER_TEMPERATURE,
     )
-
-    llm = llm.with_structured_output(Question)
-    question_rewriter_llm = QuestionRewriterPrompt | llm
-
-    GeneratedQuestionFormat = """Question_Type: {Question_Type}, Transcript: {Context}, Question: {Question}\nOptions: {Options}\nAnswer: {Answer}\nExplanation: {Explanation}"""
-    NewQuestionFormat = """Question_Type: {Question_Type}, Question: {Question}\nOptions: {Options}\nAnswer: {Answer}\nExplanation: {Explanation}"""
-
-    Original_Question = GeneratedQuestionFormat.format(
-        Question_Type=state["question_type"],
-        Context=state["context"],
-        Question=state["question"],
-        Options=state["options"],
-        Answer=state["answer"],
-        Explanation=state["explanation"]
-    )
-    
-    response = question_rewriter_llm.invoke({"history": state["history"], "original_question": Original_Question, "feedback": state["feedback"]})
-    
-    state["question"] = response.question
-    state["options"] = response.options
-    state["answer"] = response.answer
-    state["explanation"] = response.explanation
-
-    New_Question = NewQuestionFormat.format(
-        Question_Type=response.question_type,
-        Question=response.question,
-        Options=response.options,
-        Answer=response.answer,
-        Explanation=response.explanation
-    )
-
-    if len(state["history"]) > 0:
-        state["history"].append(f"Orginal Question: {Original_Question}\n Feedback: {state['feedback']}\n New question: {New_Question}\n Generate only new question\n")
-    else:
-        state["history"].append(f"Feedback: {state['feedback']}\n New question: {New_Question}\n Generate only new question\n")
-    
-    return state
+    chain = QuestionRewriterPrompt | llm.with_structured_output(RevisionResult)
+    response = structured_output(RevisionResult, chain.invoke({
+        "context": state["context"],
+        "question_type": state["question_type"],
+        "current_question": draft.model_dump_json(),
+        "feedback": state["feedback"],
+        "history": json.dumps(prior_revisions, ensure_ascii=False),
+    }))
+    question = requested_question(response.question, state["question_type"])
+    if response.status == "unchanged" and question != draft:
+        raise StructuredOutputError("An unchanged revision must preserve the current question")
+    revision = {
+        "feedback": state["feedback"],
+        "status": response.status,
+        "reason": response.reason,
+        "question": question.model_dump(),
+    }
+    return {**state, **question.model_dump(), "history": (prior_revisions + [revision])[-3:]}
 
 graph = StateGraph(QuestionGenState)
 
