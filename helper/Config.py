@@ -59,6 +59,7 @@ class Settings(BaseSettings):
     EMBEDDING_MODEL_PROVIDER: EmbeddingProvider
     CHUNK_SIZE: int = Field(gt=0)
     CHUNK_OVERLAP: int = Field(ge=0)
+    CHUNKING_STRATEGY: Literal["recursive", "token"] = "recursive"
 
     model_config = SettingsConfigDict(env_file=".env")
 
