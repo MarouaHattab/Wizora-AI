@@ -15,7 +15,8 @@ from chains.contracts import (
 from helper import get_settings
 from helper.session_review import acquire_session, accept_feedback, review_revision, session_status
 from helper.asset_http import read_asset_text
-from helper.workflow_history import normalize_review_state
+from helper.question_review import REVIEW_MESSAGE
+from helper.workflow_history import critic_feedback_value, normalize_review_state
 
 router = APIRouter()
 settings = get_settings()
@@ -36,13 +37,21 @@ def question_response(thread_id, snapshot):
             "options": current_graph_state.get("options"),
             "answer": current_graph_state.get("answer"),
             "explanation": current_graph_state.get("explanation"),
-            "message": "Provide feedback or type 'auto' to automatically generate a new question or 'save' to finish",
+            "message": REVIEW_MESSAGE,
         },
         "current_state": current_graph_state,
     }
+    critic = critic_feedback_value(current_graph_state)
+    if critic is not None:
+        response["data_for_feedback"]["critic_verdict"] = critic.verdict
+        response["data_for_feedback"]["critic_feedback"] = critic.feedback
+    if current_graph_state.get("review_notice"):
+        response["data_for_feedback"]["revision_notice"] = current_graph_state["review_notice"]
+    if current_graph_state.get("revision_limit_reached"):
+        response["data_for_feedback"]["revision_limit_reached"] = True
     history = current_graph_state.get("history", [])
     if history and isinstance(history[-1], dict) and history[-1].get("status") == "unchanged":
-        response["data_for_feedback"]["revision_notice"] = history[-1].get("reason")
+        response["data_for_feedback"].setdefault("revision_notice", history[-1].get("reason"))
     return response
 
 
@@ -59,6 +68,7 @@ async def start_question_generation_session(
         question="", options=None, answer="", explanation="", history=[],
         feedback="", human_feedback_text="", critic_feedback=None,
         feedback_review_id=None, revision_requirements=[], state_version=4,
+        auto_revision_count=0, review_model_calls=0, revision_limit_reached=False,
     )
     config = {"configurable": {"thread_id": thread_id}}
     lock = acquire_session("question_generation", thread_id)
