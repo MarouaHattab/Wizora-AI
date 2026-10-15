@@ -83,7 +83,6 @@ def UserFeedbackNode(state: SummaryGenState) -> SummaryGenState:
     return state
 
 async def UserFeedbackNodeStream(state: SummaryGenState) -> SummaryGenState:
-    print("DEBUG: UserFeedbackNode entered. Preparing interrupt_payload.") 
     interrupt_payload = {
         "table_of_contents": state["Main_Points"],
         "summary": state["summary"],
@@ -103,7 +102,7 @@ async def UserFeedbackNodeStream(state: SummaryGenState) -> SummaryGenState:
     return state
 
 def Router(state: SummaryGenState): 
-    if state.get("feedback", "").lower() == "save":
+    if state.get("feedback", "").strip().casefold() == "save":
         return  "save"
     else:
         return "feedback"

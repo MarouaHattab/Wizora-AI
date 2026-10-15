@@ -54,9 +54,9 @@ def HumanFeedback(state: QuestionGenState) -> QuestionGenState:
     return state
     
 def Router(state: QuestionGenState) -> str:
-    if state["feedback"].lower() == "save":
+    if state["feedback"].strip().casefold() == "save":
         return "save"
-    elif state["feedback"].lower() == "auto":
+    elif state["feedback"].strip().casefold() == "auto":
         return "auto"
     else:
         return "feedback"
