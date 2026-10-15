@@ -8,11 +8,14 @@ from collections.abc import Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from threading import RLock
+from time import perf_counter
 from uuid import uuid4
 
 import chromadb
+import numpy as np
 from chromadb.config import Settings as ChromaSettings
 from langchain_community.vectorstores import Chroma
+from langchain_community.vectorstores.utils import maximal_marginal_relevance
 from langchain_core.documents import Document
 
 from llm.EmbeddingProviderFactory import EmbeddingProviderFactory, resolve_embedding_config
@@ -38,6 +41,14 @@ _build_locks = {}
 
 
 @dataclass(frozen=True)
+class RetrievalHit:
+    document: Document
+    # A bounded, metric-derived affinity; this is not a support probability.
+    relevance: float
+    rank: int
+
+
+@dataclass(frozen=True)
 class AssetIndex:
     asset_id: str
     index_version: str
@@ -46,6 +57,16 @@ class AssetIndex:
     _expected_chunks: dict = field(repr=False, compare=False)
     _collection_metadata: dict = field(repr=False, compare=False)
     _lock: RLock = field(default_factory=RLock, repr=False, compare=False)
+
+    def query_fits(self, question: str) -> bool:
+        embedding = self.vectorstore._embedding_function
+        counter, limit = getattr(embedding, "token_count", None), getattr(embedding, "max_tokens", None)
+        if callable(counter) and type(limit) is int:
+            count = counter(question)
+            if type(count) is not int or count < 0:
+                raise EmbeddingError("The retrieval tokenizer returned an invalid count")
+            return count <= limit
+        return True
 
     def retrieve(self, question: str) -> list[Document]:
         with self._lock:
@@ -80,6 +101,180 @@ class AssetIndex:
                     raise IndexingError("Retrieved content does not match the requested asset index")
                 document.id = chunk_id
             return documents
+
+    def retrieve_scored(
+        self, question: str, *, strategy: str = "mmr", k: int = 5,
+        fetch_k: int = 20, min_relevance: float = 0.0, lambda_mult: float = 0.5,
+        exclude_ids=(), adjacent: bool = False,
+    ) -> list[RetrievalHit]:
+        """Retrieve within this immutable index using one query embedding.
+
+        Chroma returns squared L2, cosine distance, or one minus inner product,
+        according to the collection's actual configuration. The reported affinity
+        is a monotonic bounded transformation of that distance, not confidence.
+        Adjacent chunks compete within the same result limit and must pass the
+        same scope, integrity, and distance threshold checks.
+        """
+        _validate_retrieval(question, strategy, k, fetch_k, min_relevance, lambda_mult)
+        if not isinstance(adjacent, bool) or not isinstance(exclude_ids, (list, tuple, set, frozenset)):
+            raise ValueError("Invalid retrieval exclusions or adjacency setting")
+        if any(not isinstance(value, str) or not value for value in exclude_ids):
+            raise ValueError("Retrieval exclusions must contain chunk identifiers")
+        excluded = set(exclude_ids)
+        started = perf_counter()
+        with self._lock:
+            if not _is_complete(self):
+                raise IndexingError("The asset index is incomplete; rebuild it before retrieval")
+            available = self.chunk_count - len(excluded.intersection(self._expected_chunks))
+            if not available:
+                return []
+            try:
+                embedding = self.vectorstore._embedding_function
+                if not self.query_fits(question):
+                    raise EmbeddingError("The retrieval query exceeds the embedding token budget")
+                query_vector = np.asarray(embedding.embed_query(question), dtype=np.float32)
+                if query_vector.ndim != 1 or not len(query_vector) or not np.isfinite(query_vector).all():
+                    raise EmbeddingError("The query embedding must be a finite vector")
+                collection = self.vectorstore._collection
+                metric = _collection_metric(collection)
+                filters = [{"asset_id": self.asset_id}, {"index_version": self.index_version}]
+                if excluded:
+                    filters.append({"chunk_id": {"$nin": sorted(excluded)}})
+                rows = collection.query(
+                    query_embeddings=[query_vector.tolist()],
+                    n_results=min(fetch_k, available), where={"$and": filters},
+                    include=["documents", "metadatas", "distances", "embeddings"],
+                )
+                candidates = _retrieval_rows(self, rows, metric, query_vector)
+                if adjacent and candidates:
+                    # Expand the closest anchors, never the entire asset. Neighbours
+                    # use stored vectors, so this does not embed the query again.
+                    anchors = candidates[:max(1, min(k // 2, len(candidates)))]
+                    positions = {
+                        metadata["chunk_index"]: chunk_id
+                        for chunk_id, (_, metadata) in self._expected_chunks.items()
+                    }
+                    present = {row[0].id for row in candidates}.union(excluded)
+                    neighbour_ids = []
+                    for document, _, _ in anchors:
+                        position = document.metadata["chunk_index"]
+                        for index in (position - 1, position + 1):
+                            identifier = positions.get(index)
+                            if identifier is not None and identifier not in present:
+                                neighbour_ids.append(identifier)
+                                present.add(identifier)
+                    if neighbour_ids:
+                        neighbours = collection.get(
+                            ids=neighbour_ids[:2 * k],
+                            where={"$and": filters},
+                            include=["documents", "metadatas", "embeddings"],
+                        )
+                        for identifier, text, metadata, vector in zip(
+                            neighbours["ids"], neighbours["documents"],
+                            neighbours["metadatas"], neighbours["embeddings"], strict=True,
+                        ):
+                            document = _retrieved_document(self, identifier, text, metadata)
+                            distance = _vector_distance(query_vector, vector, metric)
+                            candidates.append((document, _distance_affinity(distance, metric), vector))
+                candidates = [row for row in candidates if row[1] >= min_relevance]
+                candidates.sort(key=lambda row: -row[1])
+                if strategy == "mmr" and candidates:
+                    selected = set(maximal_marginal_relevance(
+                        query_vector, [row[2] for row in candidates],
+                        lambda_mult=lambda_mult, k=min(k, len(candidates)),
+                    ))
+                    # Match the existing Chroma adapter's distance-ordered output.
+                    candidates = [row for position, row in enumerate(candidates) if position in selected]
+                else:
+                    candidates = candidates[:k]
+                hits = [RetrievalHit(row[0], row[1], rank) for rank, row in enumerate(candidates, 1)]
+            except ProcessingError:
+                raise
+            except Exception as exc:
+                raise IndexingError("Unable to retrieve the asset's indexed content") from exc
+        _logger.debug(
+            "Asset retrieval strategy=%s metric=%s requested=%d returned=%d excluded=%d elapsed_ms=%.1f",
+            strategy, metric, k, len(hits), len(excluded), (perf_counter() - started) * 1000,
+        )
+        return hits
+
+
+def _validate_retrieval(question, strategy, k, fetch_k, min_relevance, lambda_mult):
+    if not isinstance(question, str) or not question.strip():
+        raise ValueError("A nonblank retrieval query is required")
+    if strategy not in {"mmr", "similarity"}:
+        raise ValueError("Retrieval strategy must be mmr or similarity")
+    if type(k) is not int or type(fetch_k) is not int or not 1 <= k <= fetch_k <= 1000:
+        raise ValueError("Retrieval requires 1 <= k <= fetch_k <= 1000")
+    for value in (min_relevance, lambda_mult):
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or not 0 <= value <= 1:
+            raise ValueError("Retrieval affinity and diversity must be between zero and one")
+
+
+def _collection_metric(collection):
+    configuration = getattr(collection, "configuration_json", {}) or {}
+    hnsw = configuration.get("hnsw") or configuration.get("hnsw_configuration") or {}
+    configured = hnsw.get("space")
+    metadata = (collection.metadata or {}).get("hnsw:space")
+    if configured is not None and metadata is not None and configured != metadata:
+        raise IndexingError("The index distance configuration is inconsistent")
+    metric = configured or metadata or "l2"
+    if metric not in {"l2", "cosine", "ip"}:
+        raise IndexingError("The index uses an unsupported distance metric")
+    return metric
+
+
+def _distance_affinity(distance, metric):
+    if isinstance(distance, bool) or not isinstance(distance, (int, float, np.number)) or not math.isfinite(distance):
+        raise IndexingError("The index returned a nonfinite distance")
+    if metric == "l2":
+        if distance < -1e-5:
+            raise IndexingError("The index returned an invalid squared L2 distance")
+        return 1.0 / (1.0 + math.sqrt(max(0.0, distance)))
+    if metric == "cosine":
+        if not -1e-5 <= distance <= 2.00001:
+            raise IndexingError("The index returned an invalid cosine distance")
+        return max(0.0, min(1.0, 1.0 - distance / 2.0))
+    return 0.5 + math.atan(1.0 - distance) / math.pi
+
+
+def _vector_distance(query, vector, metric):
+    vector = np.asarray(vector, dtype=np.float32)
+    if vector.shape != query.shape or not np.isfinite(vector).all():
+        raise IndexingError("The index returned an invalid evidence vector")
+    if metric == "l2":
+        return float(np.sum((query - vector) ** 2))
+    if metric == "ip":
+        return 1.0 - float(np.dot(query, vector))
+    denominator = float(np.linalg.norm(query) * np.linalg.norm(vector))
+    return 1.0 - float(np.dot(query, vector)) / denominator if denominator else 1.0
+
+
+def _retrieved_document(index, identifier, text, metadata):
+    expected = index._expected_chunks.get(identifier)
+    if (
+        not isinstance(metadata, dict) or expected is None
+        or metadata.get("chunk_id") != identifier
+        or metadata.get("asset_id") != index.asset_id
+        or metadata.get("index_version") != index.index_version
+        or (text, metadata) != expected
+    ):
+        raise IndexingError("Retrieved content does not match the requested asset index")
+    return Document(id=identifier, page_content=text, metadata=metadata)
+
+
+def _retrieval_rows(index, rows, metric, query_vector):
+    candidates = []
+    for identifier, text, metadata, distance, vector in zip(
+        rows["ids"][0], rows["documents"][0], rows["metadatas"][0],
+        rows["distances"][0], rows["embeddings"][0], strict=True,
+    ):
+        document = _retrieved_document(index, identifier, text, metadata)
+        _vector_distance(query_vector, vector, metric)
+        candidates.append((document, _distance_affinity(distance, metric), vector))
+    if len({row[0].id for row in candidates}) != len(candidates):
+        raise IndexingError("The index returned duplicate chunk identifiers")
+    return candidates
 
 
 def _setting(config, name):

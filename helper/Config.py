@@ -74,6 +74,26 @@ class Settings(BaseSettings):
     REVISION_CONTEXT_CHARACTERS: int = Field(default=6000, ge=512)
     REVISION_REQUIREMENTS_CHARACTERS: int = Field(default=8000, ge=512)
 
+    RAG_RETRIEVAL_STRATEGY: Literal["mmr", "similarity"] = "mmr"
+    RAG_TOP_K: int = Field(default=5, ge=1, le=20)
+    RAG_FETCH_K: int = Field(default=20, ge=1, le=100)
+    RAG_MIN_RELEVANCE: float = Field(default=0, ge=0, le=1, allow_inf_nan=False)
+    RAG_MMR_LAMBDA: float = Field(default=0.5, ge=0, le=1, allow_inf_nan=False)
+    RAG_MAX_EVIDENCE_DOCUMENTS: int = Field(default=8, ge=1, le=20)
+    RAG_MAX_EVIDENCE_CHARACTERS: int = Field(default=16000, ge=512)
+    RAG_NEAR_DUPLICATE_THRESHOLD: float = Field(default=0.95, ge=0.8, le=1, allow_inf_nan=False)
+    RAG_CONTEXT_WINDOW_TOKENS: int = Field(default=16384, ge=2048)
+    RAG_PROMPT_RESERVE_TOKENS: int = Field(default=3000, ge=512)
+    RAG_OUTPUT_RESERVE_TOKENS: int = Field(default=2048, ge=256)
+    RAG_MAX_EVIDENCE_TOKENS: int = Field(default=7000, ge=256)
+    RAG_HISTORY_MESSAGES: int = Field(default=6, ge=2)
+    RAG_HISTORY_CHARACTERS: int = Field(default=2000, ge=256)
+    RAG_REWRITE_ENABLED: bool = True
+    RAG_QUERY_MAX_CHARACTERS: int = Field(default=1200, ge=128, le=2000)
+    RAG_CORRECTIVE_PASSES: int = Field(default=1, ge=0, le=1)
+    RAG_CORRECTIVE_TOP_K: int = Field(default=10, ge=1, le=20)
+    RAG_CORRECTIVE_FETCH_K: int = Field(default=40, ge=1, le=100)
+
     model_config = SettingsConfigDict(env_file=Path(__file__).resolve().parents[1] / ".env")
 
     @field_validator(
@@ -113,6 +133,11 @@ class Settings(BaseSettings):
             raise ValueError("REVISION_HISTORY_LIMIT must cover REVISION_CONTEXT_RECORDS")
         if self.REVISION_HISTORY_CHARACTERS < self.REVISION_CONTEXT_CHARACTERS:
             raise ValueError("REVISION_HISTORY_CHARACTERS must cover REVISION_CONTEXT_CHARACTERS")
+        if self.RAG_FETCH_K < self.RAG_TOP_K or self.RAG_CORRECTIVE_FETCH_K < self.RAG_CORRECTIVE_TOP_K:
+            raise ValueError("RAG fetch limits must cover their selected chunk limits")
+        available = self.RAG_CONTEXT_WINDOW_TOKENS - self.RAG_PROMPT_RESERVE_TOKENS - self.RAG_OUTPUT_RESERVE_TOKENS
+        if available < 256 or self.RAG_MAX_EVIDENCE_TOKENS > available:
+            raise ValueError("RAG context must reserve space for instructions, evidence and output")
         return self
 
 def get_settings():
