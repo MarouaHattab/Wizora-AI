@@ -38,9 +38,13 @@ def serialize_evidence(documents: Sequence[Document]) -> str:
             raise TypeError("Evidence page_content must be text")
         metadata = document.metadata
         excerpt = {"excerpt_id": f"E{number}", "page_content": document.page_content}
-        for key in ("asset_id", "index_version", "chunk_index"):
+        for key in (
+            "asset_id", "index_version", "chunk_index", "asset_version", "source_type",
+            "source", "page", "page_count", "start", "end", "record_id", "record_index",
+            "source_start", "source_end",
+        ):
             value = metadata.get(key)
-            if isinstance(value, (str, int)) and not isinstance(value, bool):
+            if isinstance(value, (str, int, float)) and not isinstance(value, bool):
                 excerpt[key] = value
 
         chunk_id = document.id or metadata.get("chunk_id")

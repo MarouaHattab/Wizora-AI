@@ -4,6 +4,7 @@ sys.path.append(os.path.dirname(os.path.dirname( os.path.abspath(__file__))))
 
 from helper import get_settings
 from helper.asset_index import ensure_asset_index
+from helper.asset_storage import load_asset_documents
 from llm import LLMProviderFactory
 
 from chains import GradeQuestion, GradeQuestionPrompt
@@ -30,7 +31,8 @@ def question_classifier(state: QuestionAnswerState) -> QuestionAnswerState:
     if "conversation_history" not in state:
         state["conversation_history"] = []
 
-    asset_index = ensure_asset_index(state["asset_id"], state["context"], config)
+    documents = load_asset_documents(state["asset_id"], context=state["context"])
+    asset_index = ensure_asset_index(state["asset_id"], state["context"], config, documents=documents)
     state["relevant_text"] = asset_index.retrieve(question)
 
     docs = "\n".join([doc.page_content for doc in state["relevant_text"]])

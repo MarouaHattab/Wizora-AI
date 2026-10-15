@@ -1,5 +1,4 @@
 import uuid
-import os
 import json
 from fastapi import APIRouter, HTTPException, Body
 from langchain_core.messages import HumanMessage, AIMessage, BaseMessage
@@ -7,12 +6,9 @@ from langchain_core.messages import HumanMessage, AIMessage, BaseMessage
 from controllers.GraphState import QuestionAnswerState
 from controllers.QuestionAnswerGraphController import stream_qa_graph as qa_graph, message_text
 from helper.session_review import acquire_session, session_status, SessionStreamingResponse
+from helper.asset_http import read_asset_text
 
 router = APIRouter()
-
-PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-ASSETS_BASE_PATH = os.path.join(PROJECT_ROOT, "assets")
-
 
 def _event(payload):
     return f"data: {json.dumps(payload)}\n\n"
@@ -67,20 +63,9 @@ def _stream_response(payload, config, metadata, session_lock):
 
 @router.post("/start_session_stream")
 async def start_qa_session_stream(asset_id: str = Body(..., embed=True), initial_question: str = Body(..., embed=True)):
-    if not asset_id or asset_id in {".", ".."} or "/" in asset_id or "\\" in asset_id or ":" in asset_id:
-        raise HTTPException(status_code=422, detail="Invalid asset_id")
     if not initial_question.strip():
         raise HTTPException(status_code=422, detail="Question must not be empty")
-    context_file_path = os.path.join(ASSETS_BASE_PATH, asset_id, "extracted_text.txt")
-    if not os.path.isfile(context_file_path):
-        raise HTTPException(status_code=404, detail="Asset text file not found")
-    try:
-        with open(context_file_path, "r", encoding="utf-8") as f:
-            context = f.read()
-    except (OSError, UnicodeError):
-        raise HTTPException(status_code=500, detail="Failed to read asset text") from None
-    if not context.strip():
-        raise HTTPException(status_code=422, detail="Asset has no text")
+    context = await read_asset_text(asset_id)
 
     thread_id = str(uuid.uuid4())
     initial_state = QuestionAnswerState(

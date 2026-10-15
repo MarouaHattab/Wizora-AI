@@ -1,3 +1,4 @@
+from pathlib import Path
 from typing import Annotated, Literal
 
 from pydantic import Field, SecretStr, StringConstraints, field_validator
@@ -61,7 +62,7 @@ class Settings(BaseSettings):
     CHUNK_OVERLAP: int = Field(ge=0)
     CHUNKING_STRATEGY: Literal["recursive", "token"] = "recursive"
 
-    model_config = SettingsConfigDict(env_file=".env")
+    model_config = SettingsConfigDict(env_file=Path(__file__).resolve().parents[1] / ".env")
 
     @field_validator(
         "QUESTION_GENERATER_PROVIDER", "QUESTION_REFINER_PROVIDER",

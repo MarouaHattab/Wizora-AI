@@ -1,5 +1,4 @@
 import uuid
-import os
 from fastapi import APIRouter, HTTPException, Body
 from typing import Literal
 from langgraph.types import Command
@@ -10,13 +9,9 @@ from controllers.GraphState import QuestionGenState
 from controllers.QuestionGenGraphController import qg_graph
 from chains.contracts import InsufficientSourceError, StructuredOutputError
 from helper.session_review import acquire_session, accept_feedback, review_revision, session_status
+from helper.asset_http import read_asset_text
 
 router = APIRouter()
-
-ASSETS_DIR = "assets"
-PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-ASSETS_BASE_PATH = os.path.join(PROJECT_ROOT, ASSETS_DIR)
-
 
 def question_response(thread_id, snapshot):
     status = session_status(snapshot)
@@ -50,14 +45,7 @@ async def start_question_generation_session(
     question_type: Literal["T/F", "MCQ"] = Body(..., embed=True)
 ):
     thread_id = str(uuid.uuid4())
-    context_file_path = os.path.join(ASSETS_BASE_PATH, asset_id, "extracted_text.txt")
-    if not os.path.exists(context_file_path):
-        raise HTTPException(status_code=404, detail=f"Asset text file not found for id: {asset_id}")
-    try:
-        with open(context_file_path, "r", encoding="utf-8") as f:
-            context = f.read()
-    except OSError:
-        raise HTTPException(status_code=500, detail="Failed to read asset text")
+    context = await read_asset_text(asset_id, for_question=True)
 
     initial_state = QuestionGenState(
         context=context, question_type=question_type, question="", options=None,

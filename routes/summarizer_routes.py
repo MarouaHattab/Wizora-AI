@@ -1,5 +1,4 @@
 import uuid
-import os
 import json
 from typing import AsyncGenerator
 from fastapi import APIRouter, HTTPException, Body
@@ -9,12 +8,9 @@ from langgraph.types import Command
 from controllers.GraphState import SummaryGenState
 from controllers.SummarizerGenGraphController import stream_summarizer_graph as summarizer_graph
 from helper.session_review import acquire_session, accept_feedback, validate_feedback, review_revision, session_status, SessionStreamingResponse
+from helper.asset_http import read_asset_text
 
 router = APIRouter()
-
-PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-ASSETS_BASE_PATH = os.path.join(PROJECT_ROOT, "assets")
-
 
 def summary_feedback(snapshot):
     return {
@@ -90,14 +86,7 @@ async def stream_session(thread_id, graph_input, config, lock, initial_status, r
 @router.post("/start_session_streaming")
 async def start_summarization_session_streaming(asset_id: str = Body(..., embed=True)) -> StreamingResponse:
     thread_id = str(uuid.uuid4())
-    context_file_path = os.path.join(ASSETS_BASE_PATH, asset_id, "extracted_text.txt")
-    if not os.path.exists(context_file_path):
-        raise HTTPException(status_code=404, detail=f"Asset text file not found for id: {asset_id}")
-    try:
-        with open(context_file_path, "r", encoding="utf-8") as f:
-            context = f.read()
-    except OSError:
-        raise HTTPException(status_code=500, detail="Failed to read asset text")
+    context = await read_asset_text(asset_id)
 
     initial_state = SummaryGenState(context=context, summary="", old_summary="", feedback="", Main_Points="")
     config = {"configurable": {"thread_id": thread_id}}
