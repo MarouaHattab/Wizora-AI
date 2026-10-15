@@ -20,6 +20,7 @@ TASK_CONFIGURATION = {
     "main_points": "SUMMARIZER_MAINPOINT",
     "summary": "SUMMARIZER_WRITER",
     "summary_revision": "SUMMARIZER_REWRITER",
+    "summary_structure_revision": "SUMMARIZER_REWRITER",
     "topic_grade": "GRADE_QA",
     "answer": "QUESTION_ANSWERER",
     "query_rewrite": "QUESTION_ANSWERER",

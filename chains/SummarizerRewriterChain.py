@@ -42,7 +42,8 @@ SummarizerRewriterPrompt = ChatPromptTemplate.from_messages([
         "may be shorter. Return the revised summary in clear prose. If a requested "
         "change needs information missing from or contradicted by SOURCE, append "
         "one brief sentence explaining the limitation. Avoid other commentary. "
-        "If SOURCE is empty or has no "
+        "This is a wording or unsupported-request revision: do not invent a new outline "
+        "or add sections that SOURCE does not support. If SOURCE is empty or has no "
         "substantive content, return 'No source content to summarize.'"
     )),
     few_shot_prompt,

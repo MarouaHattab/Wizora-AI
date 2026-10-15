@@ -23,11 +23,13 @@ from chains.RAGChains import (
 from chains.SummarizerGenChain import SummarizerGenPrompt
 from chains.SummarizerMainPointChain import SummarizerMainPointPrompt
 from chains.SummarizerRewriterChain import SummarizerRewriterPrompt
+from chains.SummarizerStructureChain import SummarizerStructurePrompt
 from chains.contracts import (
     ChainInputError, ProviderExecutionError, StructuredOutputError,
     requested_question, structured_output, text_output,
 )
 from chains.schemes.QuestionSchem import Feedback, GenerationResult, GradeQuestion, Question, RevisionResult
+from chains.schemes.SummarySchem import SummaryStructureRevision
 from chains.schemes.RAGSchem import EvidenceDecision, GroundedAnswer, GroundingAssessment, QueryRewrite
 
 
@@ -47,6 +49,7 @@ class RevisionInput(GenerationInput):
     current_question: Question | dict
     feedback: str | dict
     history: list[dict]
+    action: NotRequired[Literal["refine", "revise"]]
 
 
 class MainPointsInput(TypedDict):
@@ -60,6 +63,10 @@ class SummaryInput(MainPointsInput):
 class SummaryRevisionInput(MainPointsInput):
     original_summary: str
     user_feedback: str | dict
+
+
+class SummaryStructureInput(SummaryRevisionInput):
+    outline: str
 
 
 class TopicGradeInput(TypedDict):
@@ -148,8 +155,12 @@ def _revision_inputs(value):
     history = inputs.get("history")
     if not isinstance(history, list) or any(not isinstance(item, Mapping) for item in history):
         raise ChainInputError("Revision history must be a list of records")
-    return {**result, "current_question": _json(current), "feedback": _feedback(inputs.get("feedback")),
-            "history": _json(history), "_current_question": current}
+    action = inputs.get("action", "revise")
+    if action not in {"refine", "revise"}:
+        raise ChainInputError("Revision action must be refine or revise")
+    return {**result, "action": action, "current_question": _json(current),
+            "feedback": _feedback(inputs.get("feedback")), "history": _json(history),
+            "_current_question": current}
 
 
 def _main_points_inputs(value):
@@ -166,6 +177,16 @@ def _summary_revision_inputs(value):
     inputs = _mapping(value)
     return {**_main_points_inputs(inputs), "original_summary": _text(inputs, "original_summary", nonblank=True),
             "user_feedback": _feedback(inputs.get("user_feedback"))}
+
+
+def _summary_structure_inputs(value):
+    inputs = _mapping(value)
+    return {
+        **_main_points_inputs(inputs),
+        "outline": _text(inputs, "outline", nonblank=True),
+        "summary": _text(inputs, "original_summary", nonblank=True),
+        "feedback": _feedback(inputs.get("user_feedback")),
+    }
 
 
 def _topic_grade_inputs(value):
@@ -267,6 +288,13 @@ def build_summary_revision_chain(llm) -> Runnable:
     return _text_chain(llm, _summary_revision_inputs, SummarizerRewriterPrompt, SummaryRevisionInput)
 
 
+def build_summary_structure_chain(llm) -> Runnable:
+    return (RunnableLambda(_summary_structure_inputs)
+            | SummarizerStructurePrompt | _model_boundary(llm, SummaryStructureRevision)
+            | RunnableLambda(lambda value: structured_output(SummaryStructureRevision, value))).with_types(
+                input_type=SummaryStructureInput, output_type=SummaryStructureRevision)
+
+
 def build_topic_grade_chain(llm) -> Runnable:
     return (RunnableLambda(_topic_grade_inputs) | GradeQuestionPrompt | _model_boundary(llm, GradeQuestion)
             | RunnableLambda(lambda value: structured_output(GradeQuestion, value))).with_types(
@@ -333,6 +361,7 @@ TASK_BUILDERS = {
     "main_points": build_main_points_chain,
     "summary": build_summary_chain,
     "summary_revision": build_summary_revision_chain,
+    "summary_structure_revision": build_summary_structure_chain,
     "topic_grade": build_topic_grade_chain,
     "answer": build_answer_chain,
     "query_rewrite": build_query_rewrite_chain,

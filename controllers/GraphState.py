@@ -36,6 +36,12 @@ class ReviewState(TypedDict, total=False):
     history: list[RevisionRecord]
     revision_requirements: list[RevisionRequirement]
     state_version: Literal[4]
+    workflow_action: Literal["accept", "refine", "revise"]
+    auto_revision_count: int
+    review_model_calls: int
+    revision_limit_reached: bool
+    review_notice: str | None
+    revision_kind: Literal["wording", "structural", "unsupported"] | None
 
 
 class QuestionGenState(ReviewState):

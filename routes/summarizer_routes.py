@@ -24,20 +24,28 @@ logger = logging.getLogger(__name__)
 
 
 def summary_feedback(snapshot):
-    return {
+    payload = {
         "table_of_contents": snapshot.values.get("Main_Points", ""),
         "summary": snapshot.values.get("summary", ""),
         "message": "Provide feedback or type 'save' to finish",
         "waiting_for_input": True,
     }
+    if snapshot.values.get("review_notice"):
+        payload["revision_notice"] = snapshot.values["review_notice"]
+    if snapshot.values.get("revision_kind"):
+        payload["revision_kind"] = snapshot.values["revision_kind"]
+    return payload
 
 
 async def stream_session(
     thread_id, graph_input, config, lock, initial_status, review=None,
     event_version: EventVersion = "legacy",
 ) -> AsyncGenerator[str, None]:
-    public_nodes = {"main_point_summarizer", "summarizer_writer", "summarizer_rewriter", "user_feedback"}
-    token_nodes = public_nodes - {"user_feedback"}
+    public_nodes = {
+        "main_point_summarizer", "summarizer_writer", "summarizer_rewriter",
+        "summarizer_structure", "user_feedback",
+    }
+    token_nodes = public_nodes - {"user_feedback", "summarizer_structure"}
     stream = EventStream(thread_id, event_version)
     snapshot = None
     status = "failed"
