@@ -1,16 +1,27 @@
+import logging
+import time
 import uuid
-import json
 from typing import AsyncGenerator
-from fastapi import APIRouter, HTTPException, Body
+
+from fastapi import APIRouter, Body, HTTPException
 from fastapi.responses import StreamingResponse
 from langgraph.types import Command
 
+from chains.contracts import text_fragment, text_output
 from controllers.GraphState import SummaryGenState
 from controllers.SummarizerGenGraphController import stream_summarizer_graph as summarizer_graph
-from helper.session_review import acquire_session, accept_feedback, validate_feedback, review_revision, session_status, SessionStreamingResponse
+from helper import get_settings
 from helper.asset_http import read_asset_text
+from helper.session_review import (
+    SessionStreamingResponse, accept_feedback, acquire_session,
+    review_revision, session_status, validate_feedback,
+)
+from helper.sse import EventStream, EventVersion, before_deadline, close_events, events_before, public_error
 
 router = APIRouter()
+settings = get_settings()
+logger = logging.getLogger(__name__)
+
 
 def summary_feedback(snapshot):
     return {
@@ -21,78 +32,142 @@ def summary_feedback(snapshot):
     }
 
 
-async def stream_session(thread_id, graph_input, config, lock, initial_status, review=None) -> AsyncGenerator[str, None]:
+async def stream_session(
+    thread_id, graph_input, config, lock, initial_status, review=None,
+    event_version: EventVersion = "legacy",
+) -> AsyncGenerator[str, None]:
     public_nodes = {"main_point_summarizer", "summarizer_writer", "summarizer_rewriter", "user_feedback"}
     token_nodes = public_nodes - {"user_feedback"}
-    status = "failed"
+    stream = EventStream(thread_id, event_version)
     snapshot = None
+    status = "failed"
+    iterator = None
+    stage_text = {}
     try:
-        yield f'data: {json.dumps({"thread_id": thread_id, "status": initial_status})}\n\n'
+        yield stream.emit(
+            "session_started", data={"status": initial_status},
+            legacy={"thread_id": thread_id, "status": initial_status},
+        )
+        deadline = time.monotonic() + settings.GRAPH_TIMEOUT_SECONDS
         if review is not None:
             accept_feedback("summarization", thread_id, *review)
-        async for event in summarizer_graph.astream_events(graph_input, config=config, version="v2"):
-            event_type = event["event"]
+        iterator = summarizer_graph.astream_events(graph_input, config=config, version="v2")
+        async for event in events_before(iterator, deadline):
+            event_type = event.get("event")
             event_name = event.get("name", "")
             if event_type == "on_chain_start" and event_name in public_nodes:
-                payload = {
-                    "event": event_type, "name": event_name, "thread_id": thread_id,
-                    "status_update": f"Starting: {event_name}",
-                }
-                yield f'data: {json.dumps(payload)}\n\n'
+                if event_name in token_nodes:
+                    stage_text[event_name] = ""
+                yield stream.emit(
+                    "stage_started", stage=event_name,
+                    legacy={
+                        "event": event_type, "name": event_name, "thread_id": thread_id,
+                        "status_update": f"Starting: {event_name}",
+                    },
+                )
             elif event_type == "on_chat_model_stream":
                 node = event.get("metadata", {}).get("langgraph_node")
                 if node not in token_nodes:
                     continue
-                chunk = event.get("data", {}).get("chunk")
-                content = getattr(chunk, "content", "")
-                if isinstance(content, list):
-                    content = "".join(
-                        block if isinstance(block, str) else block.get("text", "")
-                        for block in content
-                        if isinstance(block, str) or isinstance(block, dict) and block.get("type") == "text"
+                content = text_fragment(event.get("data", {}).get("chunk"))
+                if content:
+                    stage_text[node] = stage_text.get(node, "") + content
+                    yield stream.emit(
+                        "text_delta", stage=node, data={"text": content},
+                        legacy={
+                            "event": "token", "name": node, "thread_id": thread_id,
+                            "token": content, "status_update": node,
+                        },
                     )
-                if isinstance(content, str) and content:
-                    payload = {
-                        "event": "token", "name": event_name, "thread_id": thread_id,
-                        "token": content, "status_update": node,
-                    }
-                    yield f'data: {json.dumps(payload)}\n\n'
-        snapshot = await summarizer_graph.aget_state(config)
+            elif event_type == "on_chain_end" and event_name in token_nodes:
+                output = event.get("data", {}).get("output")
+                field = "Main_Points" if event_name == "main_point_summarizer" else "summary"
+                if not isinstance(output, dict) or field not in output:
+                    raise ValueError("The summarization stage returned an invalid result")
+                final = text_output(output[field])
+                sent = stage_text.get(event_name, "")
+                if not final.startswith(sent):
+                    raise ValueError("The completed draft does not match the stream")
+                suffix = final[len(sent):]
+                if suffix:
+                    stage_text[event_name] = sent + suffix
+                    yield stream.emit(
+                        "text_delta", stage=event_name, data={"text": suffix},
+                        legacy={
+                            "event": "token", "name": event_name, "thread_id": thread_id,
+                            "token": suffix, "status_update": event_name,
+                        },
+                    )
+
+        snapshot = await before_deadline(summarizer_graph.aget_state(config), deadline)
         status = session_status(snapshot)
         if status == "interrupted_for_feedback":
-            payload = {
-                "event": "review", "thread_id": thread_id, "status": status,
-                "review_id": review_revision(snapshot), "data_for_feedback": summary_feedback(snapshot),
-            }
-            yield f'data: {json.dumps(payload)}\n\n'
-        elif status != "completed":
-            status = "failed"
-            yield f'data: {json.dumps({"event": "error", "thread_id": thread_id, "status": status, "detail": "Summarization did not reach a review or completion"})}\n\n'
-    except Exception as exc:
+            draft = summary_feedback(snapshot)
+            text_output(draft["summary"])
+            yield stream.emit(
+                "awaiting_feedback", stage="user_feedback",
+                data={"status": status, "review_id": review_revision(snapshot), **draft},
+                legacy={
+                    "event": "review", "thread_id": thread_id, "status": status,
+                    "review_id": review_revision(snapshot), "data_for_feedback": draft,
+                },
+            )
+        elif status == "completed":
+            summary = text_output(snapshot.values.get("summary"))
+            yield stream.emit(
+                "completed", data={"status": status, "summary": summary},
+                legacy={
+                    "event": "stream_end", "thread_id": thread_id,
+                    "status_update": "Stream ended", "status": status,
+                    "review_id": None, "summary": summary,
+                },
+            )
+        else:
+            raise ValueError("Summarization did not reach a review or completion")
+    except Exception as error:
         status = "failed"
-        yield f'data: {json.dumps({"event": "error", "thread_id": thread_id, "status": status, "detail": "Summarization execution failed", "error_type": type(exc).__name__})}\n\n'
+        public = public_error(error)
+        logger.warning(
+            "Summary stream failed (category=%s, exception_type=%s, run_id=%s)",
+            public["category"], type(error).__name__, stream.run_id,
+        )
+        frame = stream.emit(
+            "failed", data=public,
+            legacy={"event": "error", "thread_id": thread_id, "status": status, **public},
+        )
+        if frame:
+            yield frame
     finally:
-        lock.release()
+        try:
+            await close_events(iterator)
+        finally:
+            lock.release()
 
-    payload = {
-        "event": "stream_end", "thread_id": thread_id, "status_update": "Stream ended",
-        "status": status, "review_id": review_revision(snapshot),
-    }
-    if status == "completed":
-        payload["summary"] = snapshot.values.get("summary", "")
-    yield f'data: {json.dumps(payload)}\n\n'
+    if status != "completed":
+        frame = stream.transport_closed({
+            "event": "stream_end", "thread_id": thread_id, "status_update": "Stream ended",
+            "status": status, "review_id": review_revision(snapshot),
+        })
+        if frame:
+            yield frame
 
 
 @router.post("/start_session_streaming")
-async def start_summarization_session_streaming(asset_id: str = Body(..., embed=True)) -> StreamingResponse:
+async def start_summarization_session_streaming(
+    asset_id: str = Body(..., embed=True),
+    event_version: EventVersion = Body("legacy", embed=True),
+) -> StreamingResponse:
     thread_id = str(uuid.uuid4())
     context = await read_asset_text(asset_id)
-
-    initial_state = SummaryGenState(context=context, summary="", old_summary="", feedback="", Main_Points="")
+    initial_state = SummaryGenState(
+        asset_id=asset_id, context=context, summary="", feedback="", Main_Points="",
+        human_feedback_text="", critic_feedback=None, feedback_review_id=None,
+        history=[], revision_requirements=[], state_version=4,
+    )
     config = {"configurable": {"thread_id": thread_id}}
     lock = acquire_session("summarization", thread_id)
     return SessionStreamingResponse(
-        stream_session(thread_id, initial_state, config, lock, "starting_session"),
+        stream_session(thread_id, initial_state, config, lock, "starting_session", event_version=event_version),
         session_lock=lock, media_type="text/event-stream",
     )
 
@@ -102,6 +177,7 @@ async def provide_feedback_to_summarization_streaming(
     thread_id: str = Body(..., embed=True),
     feedback: str = Body(..., embed=True),
     review_id: str | None = Body(None, embed=True),
+    event_version: EventVersion = Body("legacy", embed=True),
 ) -> StreamingResponse:
     config = {"configurable": {"thread_id": thread_id}}
     lock = acquire_session("summarization", thread_id)
@@ -113,14 +189,16 @@ async def provide_feedback_to_summarization_streaming(
         raise
     except Exception:
         lock.release()
-        raise HTTPException(status_code=500, detail="Unable to validate summarization session")
+        raise HTTPException(status_code=500, detail="Unable to validate summarization session") from None
     except BaseException:
         lock.release()
         raise
     return SessionStreamingResponse(
         stream_session(
-            thread_id, Command(resume=feedback), config, lock, "resuming_with_feedback",
-            review=(snapshot, feedback, review_id),
+            thread_id,
+            Command(resume={"feedback": feedback, "review_id": review_revision(snapshot)}),
+            config, lock, "resuming_with_feedback", review=(snapshot, feedback, review_id),
+            event_version=event_version,
         ),
         session_lock=lock, media_type="text/event-stream",
     )
