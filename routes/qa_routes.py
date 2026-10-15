@@ -33,21 +33,13 @@ def _stream_response(payload, config, metadata, session_lock, event_version: Eve
             async for event in events_before(iterator, deadline):
                 event_type = event.get("event")
                 node = event.get("metadata", {}).get("langgraph_node")
-                if event_type == "on_chain_start" and event.get("name") in {
-                    "generate_answer_streaming", "off_topic_response",
-                }:
-                    stage = event["name"]
-                    frame = stream.emit("stage_started", stage=stage)
+                if event_type == "on_chain_start" and (
+                    event.get("name") in {"validate_grounding", "off_topic_response"}
+                    or node in {"validate_grounding", "off_topic_response"}
+                ):
+                    frame = stream.emit("stage_started", stage="answer")
                     if frame:
                         yield frame
-                elif event_type == "on_chat_model_stream" and node == "generate_answer_streaming":
-                    text = message_text(event.get("data", {}).get("chunk"))
-                    if text:
-                        streamed_text += text
-                        yield stream.emit(
-                            "text_delta", stage=node, data={"text": text},
-                            legacy={"type": "token", "content": text},
-                        )
 
             snapshot = await before_deadline(qa_graph.aget_state(config), deadline)
             status = session_status(snapshot)
@@ -73,7 +65,15 @@ def _stream_response(payload, config, metadata, session_lock, event_version: Eve
             if final_text != streamed_text:
                 raise ValueError("The completed answer does not match the public text")
             yield stream.emit(
-                "completed", data={"status": "completed"}, legacy={"type": "complete"},
+                "completed", data={
+                    "status": "completed", "answer_status": snapshot.values.get("answer_status"),
+                    "citations": snapshot.values.get("answer_citations", []),
+                    "grounding": snapshot.values.get("grounding_status", "not_applicable"),
+                }, legacy={
+                    "type": "complete", "answer_status": snapshot.values.get("answer_status"),
+                    "citations": snapshot.values.get("answer_citations", []),
+                    "grounding": snapshot.values.get("grounding_status", "not_applicable"),
+                },
             )
         except Exception as error:
             public = public_error(error)
@@ -117,7 +117,7 @@ async def start_qa_session_stream(
         messages=[HumanMessage(content=initial_question, id=str(uuid.uuid4()))],
         relevant_text=[], on_topic="", context=context, state_version=4, history_trimmed=0,
     )
-    config = {"configurable": {"thread_id": thread_id}}
+    config = {"configurable": {"thread_id": thread_id}, "recursion_limit": 12}
     session_lock = acquire_session("qa", thread_id)
     return _stream_response(
         initial_state, config, {"thread_id": thread_id, "asset_id": asset_id},
@@ -133,7 +133,7 @@ async def continue_qa_conversation_stream(
 ):
     if not next_question.strip():
         raise HTTPException(status_code=422, detail="Question must not be empty")
-    config = {"configurable": {"thread_id": thread_id}}
+    config = {"configurable": {"thread_id": thread_id}, "recursion_limit": 12}
     session_lock = acquire_session("qa", thread_id)
     try:
         snapshot = await qa_graph.aget_state(config)
