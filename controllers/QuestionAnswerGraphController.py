@@ -9,7 +9,7 @@ from llm import LLMProviderFactory
 from chains import GradeQuestion, GradeQuestionPrompt
 from .GraphState import QuestionAnswerState
 
-from langchain_core.messages import AIMessage
+from langchain_core.messages import AIMessage, BaseMessage
 from langgraph.graph import StateGraph, START, END
 from langgraph.checkpoint.memory import MemorySaver
 from langchain_core.prompts import ChatPromptTemplate
@@ -91,6 +91,12 @@ Question: {question}
     
     return state
 
+def message_text(message):
+    if isinstance(message, BaseMessage):
+        return message.text()
+    return ""
+
+
 async def generate_answer_streaming(state: QuestionAnswerState): 
     question = state["messages"][-1].content
     documents = state["relevant_text"] 
@@ -117,44 +123,32 @@ Question: {question}
     rag_chain = prompt | llm
     
     full_response = ""
-    
-    state["messages"].append(AIMessage(content=""))
-    
+    async for chunk in rag_chain.astream({"context": documents, "chat_history": chat_history, "question": question}):
+        full_response += message_text(chunk)
+    if not full_response.strip():
+        raise RuntimeError("The answer provider returned no text")
 
-    try:
-        async for chunk in rag_chain.astream({"context": documents, "chat_history": chat_history, "question": question}):
-            if hasattr(chunk, 'content') and chunk.content:
-                full_response += chunk.content
-                state["messages"][-1] = AIMessage(content=full_response)
-                yield state
-    
-    except Exception as e:
-        print(f"Error in streaming: {e}")
-      
-    if state["messages"] and isinstance(state["messages"][-1], AIMessage):
-        final_ai_message = state["messages"][-1]
-        state["conversation_history"] = state.get("conversation_history", []) + [
-            state["messages"][-2],  # The user's question
-            final_ai_message        # The AI's response
-        ]
-    
-    yield state
+    generation = AIMessage(content=full_response)
+    return {
+        **state,
+        "messages": state["messages"] + [generation],
+        "conversation_history": chat_history + [state["messages"][-1], generation],
+    }
 
 def off_topic_response(state: QuestionAnswerState): 
     state["messages"].append(AIMessage(content="Seems that your question is not related to the uploaded content. I cannot answer this question!"))
     return state
 
 async def off_topic_response_streaming(state: QuestionAnswerState):
-    """Streaming version of off-topic response"""
     response_text = "Seems that your question is not related to the uploaded content. I cannot answer this question!"
-    state["messages"].append(AIMessage(content=""))
-
-    print("Streaming off-topic response...")
-    for i, char in enumerate(response_text):
-        state["messages"][-1] = AIMessage(content=response_text[i])
-        yield state
-    
-    yield state
+    generation = AIMessage(content=response_text)
+    return {
+        **state,
+        "messages": state["messages"] + [generation],
+        "conversation_history": state.get("conversation_history", []) + [
+            state["messages"][-1], generation
+        ],
+    }
 
 
 stream_graph = StateGraph(QuestionAnswerState)
