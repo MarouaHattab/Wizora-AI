@@ -14,6 +14,12 @@ from chains.QuestionAnswerChain import QuestionAnswerPrompt, prepare_question_an
 from chains.QuestionGenChain import QuestionGenPrompt
 from chains.QuestionRefinerChain import QuestionRefinerPrompt
 from chains.QuestionRewriterChain import QuestionRewriterPrompt
+from chains.RAGChains import (
+    EvidenceAssessmentInput, EvidenceAssessmentPrompt, GroundedAnswerInput, GroundedAnswerPrompt,
+    GroundingCheckInput, GroundingCheckPrompt, QueryRewriteInput, QueryRewritePrompt,
+    evidence_assessment_inputs, evidence_assessment_result, grounded_answer_inputs, grounded_answer_result,
+    grounding_check_inputs, grounding_check_result, query_rewrite_inputs, query_rewrite_result,
+)
 from chains.SummarizerGenChain import SummarizerGenPrompt
 from chains.SummarizerMainPointChain import SummarizerMainPointPrompt
 from chains.SummarizerRewriterChain import SummarizerRewriterPrompt
@@ -22,6 +28,7 @@ from chains.contracts import (
     requested_question, structured_output, text_output,
 )
 from chains.schemes.QuestionSchem import Feedback, GenerationResult, GradeQuestion, Question, RevisionResult
+from chains.schemes.RAGSchem import EvidenceDecision, GroundedAnswer, GroundingAssessment, QueryRewrite
 
 
 class GenerationInput(TypedDict):
@@ -270,6 +277,55 @@ def build_answer_chain(llm) -> Runnable:
     return _text_chain(llm, _answer_inputs, QuestionAnswerPrompt, AnswerInput)
 
 
+def _rag_chain(llm, prepare, prompt, schema, validate, input_type):
+    from .runtime import token_counter_for
+
+    counter = token_counter_for(llm)
+    schema_text = json.dumps(schema.model_json_schema(), ensure_ascii=False)
+
+    def prompt_budget(value, config: RunnableConfig):
+        configurable = config.get("configurable", {})
+        if "rag_input_budget" not in configurable:
+            return value
+        budget = configurable["rag_input_budget"]
+        if type(budget) is not int or budget <= 0:
+            raise ChainInputError("RAG input budget must be a positive integer")
+        text = value.to_string() + "\n" + schema_text
+        try:
+            size = counter(text) if counter is not None else len(text.encode("utf-8"))
+        except Exception as exc:
+            raise ChainInputError("The local RAG tokenizer could not count the prompt") from exc
+        # Include chat framing and structured-output envelope overhead as well as source text.
+        if type(size) is not int or size < 0 or size + 16 * (len(value.to_messages()) + 2) > budget:
+            raise ChainInputError("The formatted RAG task exceeds its configured input budget")
+        return value
+
+    return (RunnableLambda(prepare)
+            | RunnablePassthrough.assign(_result=prompt | RunnableLambda(prompt_budget)
+                                         | _model_boundary(llm, schema))
+            | RunnableLambda(validate)).with_types(input_type=input_type, output_type=schema)
+
+
+def build_query_rewrite_chain(llm) -> Runnable:
+    return _rag_chain(llm, query_rewrite_inputs, QueryRewritePrompt, QueryRewrite,
+                      query_rewrite_result, QueryRewriteInput)
+
+
+def build_evidence_assessment_chain(llm) -> Runnable:
+    return _rag_chain(llm, evidence_assessment_inputs, EvidenceAssessmentPrompt, EvidenceDecision,
+                      evidence_assessment_result, EvidenceAssessmentInput)
+
+
+def build_grounded_answer_chain(llm) -> Runnable:
+    return _rag_chain(llm, grounded_answer_inputs, GroundedAnswerPrompt, GroundedAnswer,
+                      grounded_answer_result, GroundedAnswerInput)
+
+
+def build_grounding_check_chain(llm) -> Runnable:
+    return _rag_chain(llm, grounding_check_inputs, GroundingCheckPrompt, GroundingAssessment,
+                      grounding_check_result, GroundingCheckInput)
+
+
 TASK_BUILDERS = {
     "question_generation": build_question_generation_chain,
     "question_review": build_question_review_chain,
@@ -279,6 +335,10 @@ TASK_BUILDERS = {
     "summary_revision": build_summary_revision_chain,
     "topic_grade": build_topic_grade_chain,
     "answer": build_answer_chain,
+    "query_rewrite": build_query_rewrite_chain,
+    "evidence_assessment": build_evidence_assessment_chain,
+    "grounded_answer": build_grounded_answer_chain,
+    "grounding_check": build_grounding_check_chain,
 }
 
 

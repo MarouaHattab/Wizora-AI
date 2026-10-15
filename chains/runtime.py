@@ -22,12 +22,30 @@ TASK_CONFIGURATION = {
     "summary_revision": "SUMMARIZER_REWRITER",
     "topic_grade": "GRADE_QA",
     "answer": "QUESTION_ANSWERER",
+    "query_rewrite": "QUESTION_ANSWERER",
+    "evidence_assessment": "GRADE_QA",
+    "grounded_answer": "QUESTION_ANSWERER",
+    "grounding_check": "GRADE_QA",
 }
 _MODEL_LIMIT = 16
 _CHAIN_LIMIT = 64
 _models = OrderedDict()
 _chains = OrderedDict()
 _lock = RLock()
+
+
+def token_counter_for(llm):
+    """Use an explicitly configured local tokenizer; default SDK counters may make network calls."""
+    counter = getattr(llm, "custom_get_token_ids", None)
+    if not callable(counter):
+        return None
+
+    def count(text):
+        if not isinstance(text, str):
+            raise ChainInputError("Token counting requires text")
+        return len(counter(text))
+
+    return count
 
 
 def _setting(settings, name, default=None):
@@ -73,11 +91,9 @@ def _discard_closed_loops():
             del _chains[key]
 
 
-def get_task_chain(task: str, settings, *, llm=None) -> Runnable:
+def _model_key(task, settings):
     if not isinstance(task, str) or task not in TASK_CONFIGURATION:
         raise ChainInputError("Unknown LLM task")
-    if llm is not None:
-        return build_task_chain(task, llm)
     prefix = TASK_CONFIGURATION[task]
     provider = _setting(settings, f"{prefix}_PROVIDER")
     model_id = _setting(settings, f"{prefix}_MODEL_ID")
@@ -95,21 +111,55 @@ def get_task_chain(task: str, settings, *, llm=None) -> Runnable:
         model_id = f"models/{model_id}"
     if provider == "GROQ" and temperature == 0:
         temperature = 1e-8
-    model_key = (_scope(), provider, model_id, temperature, timeout,
-                 _credential_fingerprint(settings, provider))
+    return (_scope(), provider, model_id, temperature, timeout,
+            _credential_fingerprint(settings, provider))
+
+
+def _resolve_model(settings, model_key):
+    model = _models.get(model_key)
+    if model is None:
+        _, provider, model_id, temperature, timeout, _ = model_key
+        try:
+            model = LLMProviderFactory(settings).create(provider, model_id, temperature, timeout)
+        except Exception as exc:
+            raise ProviderExecutionError("The configured model could not be initialized") from exc
+        _remember(_models, model_key, model, _MODEL_LIMIT)
+    else:
+        _models.move_to_end(model_key)
+    return model
+
+
+def get_task_chain(task: str, settings, *, llm=None) -> Runnable:
+    if not isinstance(task, str) or task not in TASK_CONFIGURATION:
+        raise ChainInputError("Unknown LLM task")
+    if llm is not None:
+        return build_task_chain(task, llm)
+    model_key = _model_key(task, settings)
     chain_key = (task, model_key)
     with _lock:
         _discard_closed_loops()
         if chain_key in _chains:
             _chains.move_to_end(chain_key)
-            return _chains[chain_key]
-        model = _models.get(model_key)
-        if model is None:
-            try:
-                model = LLMProviderFactory(settings).create(provider, model_id, temperature, timeout)
-            except Exception as exc:
-                raise ProviderExecutionError("The configured model could not be initialized") from exc
-            _remember(_models, model_key, model, _MODEL_LIMIT)
-        else:
-            _models.move_to_end(model_key)
-        return _remember(_chains, chain_key, build_task_chain(task, model), _CHAIN_LIMIT)
+            return _chains[chain_key][0]
+        model = _resolve_model(settings, model_key)
+        chain = build_task_chain(task, model)
+        _remember(_chains, chain_key, (chain, model), _CHAIN_LIMIT)
+        return chain
+
+
+def get_task_token_counter(task: str, settings, *, llm=None, initialize=True):
+    """Share a cached local tokenizer. Retrieval must not construct a chat model."""
+    if not isinstance(task, str) or task not in TASK_CONFIGURATION:
+        raise ChainInputError("Unknown LLM task")
+    if llm is not None:
+        return token_counter_for(llm)
+    model_key = _model_key(task, settings)
+    chain_key = (task, model_key)
+    with _lock:
+        _discard_closed_loops()
+        if chain_key in _chains:
+            _chains.move_to_end(chain_key)
+            return token_counter_for(_chains[chain_key][1])
+        if not initialize:
+            return None
+        return token_counter_for(_resolve_model(settings, model_key))
