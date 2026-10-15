@@ -1,10 +1,27 @@
+from collections import OrderedDict
 from collections.abc import Mapping
+from threading import RLock
 from typing import Any
+from weakref import WeakValueDictionary
 
 from langchain_huggingface import HuggingFaceEmbeddings
+
 from helper.Config import Settings
-from .providers.LocalEmbeddingProvider import LocalEmbeddingProvider
+from helper.ingestion_errors import ModelInitializationError
+from .embedding_resource import EmbeddingResource
+from .providers.LocalEmbeddingProvider import (
+    LOCAL_MAX_SEQ_LENGTH,
+    LOCAL_NORMALIZE_EMBEDDINGS,
+    LOCAL_POOLING_MODE,
+    LocalEmbeddingProvider,
+)
 from .Enums import EmbeddingEnums
+
+
+_RESOURCE_CACHE_SIZE = 2
+_resource_lock = RLock()
+_resources: OrderedDict[tuple, EmbeddingResource] = OrderedDict()
+_live_resources: WeakValueDictionary[tuple, EmbeddingResource] = WeakValueDictionary()
 
 
 def resolve_embedding_config(
@@ -44,8 +61,45 @@ class EmbeddingProviderFactory:
     def __init__(self, config: Settings | Mapping[str, Any]):
         self.config = config
 
-    def create(self, provider: str | None = None, model_name: str | None = None):
+    def create(
+        self, provider: str | None = None, model_name: str | None = None
+    ) -> EmbeddingResource:
         provider, model_name = resolve_embedding_config(self.config, provider, model_name)
-        if provider == EmbeddingEnums.LOCAL_EMBEDDING.value:
-            return LocalEmbeddingProvider(model_id=model_name)
-        return HuggingFaceEmbeddings(model_name=model_name)
+        local = provider == EmbeddingEnums.LOCAL_EMBEDDING.value
+        pipeline = (
+            ("transformer", LOCAL_MAX_SEQ_LENGTH, LOCAL_POOLING_MODE, LOCAL_NORMALIZE_EMBEDDINGS)
+            if local else ("sentence-transformers-model-default", False)
+        )
+        key = (provider, model_name, pipeline)
+        with _resource_lock:
+            if key in _resources:
+                _resources.move_to_end(key)
+                return _resources[key]
+            if key in _live_resources:
+                resource = _live_resources[key]
+                _resources[key] = resource
+                while len(_resources) > _RESOURCE_CACHE_SIZE:
+                    _resources.popitem(last=False)
+                return resource
+            try:
+                if local:
+                    resource = LocalEmbeddingProvider(model_id=model_name)
+                else:
+                    delegate = HuggingFaceEmbeddings(model_name=model_name)
+                    resource = EmbeddingResource(
+                        delegate._client,
+                        provider=provider,
+                        model_id=model_name,
+                        pipeline="sentence-transformers-model-default",
+                        normalize_embeddings=False,
+                        delegate=delegate,
+                    )
+            except ModelInitializationError:
+                raise
+            except Exception as exc:
+                raise ModelInitializationError("The embedding model could not be initialized.") from exc
+            _resources[key] = resource
+            _live_resources[key] = resource
+            while len(_resources) > _RESOURCE_CACHE_SIZE:
+                _resources.popitem(last=False)
+            return resource
