@@ -1,125 +1,160 @@
-import json
 import os
 import sys
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from helper import get_settings
-from llm import LLMProviderFactory
-from chains import QuestionGenPrompt, QuestionRefinerPrompt, QuestionRewriterPrompt
-from chains import Question, Feedback, GenerationResult, RevisionResult
-from chains.contracts import InsufficientSourceError, StructuredOutputError, requested_question, structured_output
+from helper.workflow_history import (
+    critic_feedback_value,
+    human_feedback_value,
+    revision_context,
+    revision_delta,
+)
+from chains import Question
+from chains.contracts import InsufficientSourceError, structured_output
+from chains.runtime import get_task_chain
 from .GraphState import QuestionGenState
+from langchain_core.runnables import RunnableConfig, RunnableLambda
 from langgraph.graph import StateGraph, START, END
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.types import interrupt
 
-config = get_settings()
+settings = get_settings()
 
 
 def current_question(state):
     return structured_output(Question, {
-        key: state[key] for key in ("question", "question_type", "options", "answer", "explanation")
+        key: state.get(key) for key in ("question", "question_type", "options", "answer", "explanation")
     })
 
 
-def QuestionGenerator(state: QuestionGenState) -> QuestionGenState:
+def _generation_inputs(state):
     if not state["context"].strip():
         raise InsufficientSourceError("The source contains no educational material.")
-    llm = LLMProviderFactory(config).create(
-        config.QUESTION_GENERATER_PROVIDER,
-        config.QUESTION_GENERATER_MODEL_ID,
-        config.QUESTION_GENERATER_TEMPERATURE,
-    )
-    chain = QuestionGenPrompt | llm.with_structured_output(GenerationResult)
-    result = structured_output(GenerationResult, chain.invoke({
-        "context": state["context"], "question_type": state["question_type"]
-    }))
+    return {"context": state["context"], "question_type": state["question_type"]}
+
+
+def _generation_delta(result):
     if result.status == "insufficient_source":
         raise InsufficientSourceError(result.reason)
-    question = requested_question(result.question, state["question_type"])
-    return {**state, **question.model_dump(), "history": state.get("history") or []}
+    return result.question.model_dump()
 
 
-def HumanFeedback(state: QuestionGenState) -> QuestionGenState:
-    human_feedback = interrupt({
+def QuestionGenerator(state: QuestionGenState, config: RunnableConfig = None) -> dict:
+    inputs = _generation_inputs(state)
+    result = get_task_chain("question_generation", settings).invoke(inputs, config=config)
+    return _generation_delta(result)
+
+
+async def QuestionGeneratorStream(state: QuestionGenState, config: RunnableConfig = None) -> dict:
+    inputs = _generation_inputs(state)
+    result = await get_task_chain("question_generation", settings).ainvoke(inputs, config=config)
+    return _generation_delta(result)
+
+
+def _human_feedback_delta(value):
+    if isinstance(value, str):
+        feedback, review_id = value, None
+    elif isinstance(value, dict) and isinstance(value.get("feedback"), str):
+        feedback, review_id = value["feedback"], value.get("review_id")
+        if review_id is not None and not isinstance(review_id, str):
+            raise ValueError("A feedback review_id must be text")
+    else:
+        raise ValueError("Human feedback must be text or a feedback review object")
+    return {
+        "feedback": feedback,
+        "human_feedback_text": feedback,
+        "critic_feedback": None,
+        "feedback_review_id": review_id,
+        "state_version": 4,
+    }
+
+
+def HumanFeedback(state: QuestionGenState) -> dict:
+    return _human_feedback_delta(interrupt({
         "gernerated_question": state["question"],
         "options": state["options"],
         "answer": state["answer"],
         "explanation": state["explanation"],
         "message": "Provide feedback or type 'auto' to automatically generate a new question or 'save' to finish",
-    })
-    state["feedback"] = human_feedback
-    return state
+    }))
+
+
+async def HumanFeedbackStream(state: QuestionGenState) -> dict:
+    return HumanFeedback(state)
 
 
 def Router(state: QuestionGenState) -> str:
-    if state["feedback"].strip().casefold() == "save":
+    feedback = human_feedback_value(state).strip().casefold()
+    if feedback == "save":
         return "save"
-    elif state["feedback"].strip().casefold() == "auto":
+    if feedback == "auto":
         return "auto"
     return "feedback"
 
 
-def QuestionRefiner(state: QuestionGenState) -> QuestionGenState:
-    question = current_question(state)
-    llm = LLMProviderFactory(config).create(
-        config.QUESTION_REFINER_PROVIDER,
-        config.QUESTION_REFINER_MODEL_ID,
-        config.QUESTION_REFINER_TEMPERATURE,
-    )
-    chain = QuestionRefinerPrompt | llm.with_structured_output(Feedback)
-    response = structured_output(Feedback, chain.invoke({
-        "context": state["context"],
-        **question.model_dump(),
-        "options": json.dumps(question.options, ensure_ascii=False),
-    }))
-    return {**state, "feedback": response.model_dump_json()}
+def _review_inputs(state):
+    return {"context": state["context"], **current_question(state).model_dump()}
 
 
-def QuestionRewriter(state: QuestionGenState) -> QuestionGenState:
-    draft = current_question(state)
-    prior_revisions = [entry for entry in state.get("history", []) if isinstance(entry, dict)][-3:]
-    llm = LLMProviderFactory(config).create(
-        config.QUESTION_REWRITER_PROVIDER,
-        config.QUESTION_REWRITER_MODEL_ID,
-        config.QUESTION_REWRITER_TEMPERATURE,
-    )
-    chain = QuestionRewriterPrompt | llm.with_structured_output(RevisionResult)
-    response = structured_output(RevisionResult, chain.invoke({
+def QuestionRefiner(state: QuestionGenState, config: RunnableConfig = None) -> dict:
+    inputs = _review_inputs(state)
+    response = get_task_chain("question_review", settings).invoke(inputs, config=config)
+    return {"critic_feedback": response}
+
+
+async def QuestionRefinerStream(state: QuestionGenState, config: RunnableConfig = None) -> dict:
+    inputs = _review_inputs(state)
+    response = await get_task_chain("question_review", settings).ainvoke(inputs, config=config)
+    return {"critic_feedback": response}
+
+
+def _revision_inputs(state):
+    return {
         "context": state["context"],
         "question_type": state["question_type"],
-        "current_question": draft.model_dump_json(),
-        "feedback": state["feedback"],
-        "history": json.dumps(prior_revisions, ensure_ascii=False),
-    }))
-    question = requested_question(response.question, state["question_type"])
-    if response.status == "unchanged" and question != draft:
-        raise StructuredOutputError("An unchanged revision must preserve the current question")
-    revision = {
-        "feedback": state["feedback"],
-        "status": response.status,
-        "reason": response.reason,
-        "question": question.model_dump(),
+        "current_question": current_question(state),
+        "feedback": {
+            "human_feedback": human_feedback_value(state),
+            "critic_feedback": critic_feedback_value(state),
+        },
+        "history": revision_context(state, settings),
     }
-    return {**state, **question.model_dump(), "history": (prior_revisions + [revision])[-3:]}
+
+
+def _revision_delta(state, response):
+    return {
+        **response.question.model_dump(),
+        **revision_delta(
+            state, settings, draft=response.question, status=response.status,
+            reason=response.reason, critic=critic_feedback_value(state),
+        ),
+    }
+
+
+def QuestionRewriter(state: QuestionGenState, config: RunnableConfig = None) -> dict:
+    inputs = _revision_inputs(state)
+    response = get_task_chain("question_revision", settings).invoke(inputs, config=config)
+    return _revision_delta(state, response)
+
+
+async def QuestionRewriterStream(state: QuestionGenState, config: RunnableConfig = None) -> dict:
+    inputs = _revision_inputs(state)
+    response = await get_task_chain("question_revision", settings).ainvoke(inputs, config=config)
+    return _revision_delta(state, response)
+
 
 graph = StateGraph(QuestionGenState)
-
-graph.add_node("question_gen", QuestionGenerator)
-graph.add_node("question_refiner", QuestionRefiner)
-graph.add_node("question_rewriter", QuestionRewriter)
-graph.add_node("human_feedback", HumanFeedback)
+graph.add_node("question_gen", RunnableLambda(QuestionGenerator, afunc=QuestionGeneratorStream))
+graph.add_node("question_refiner", RunnableLambda(QuestionRefiner, afunc=QuestionRefinerStream))
+graph.add_node("question_rewriter", RunnableLambda(QuestionRewriter, afunc=QuestionRewriterStream))
+graph.add_node("human_feedback", RunnableLambda(HumanFeedback, afunc=HumanFeedbackStream))
 
 graph.add_edge(START, "question_gen")
 graph.add_edge("question_gen", "human_feedback")
 graph.add_conditional_edges("human_feedback", Router, {"save": END, "auto": "question_refiner", "feedback": "question_rewriter"})
-
 graph.add_edge("question_refiner", "question_rewriter")
 graph.add_edge("question_rewriter", "human_feedback")
 
 checkpointer = MemorySaver()
 qg_graph = graph.compile(checkpointer=checkpointer)
-
-graph = graph.compile() # for langgraph dev 
-# from IPython.display import Image, display
-# display(Image(graph.get_graph().draw_mermaid_png()))
+graph = graph.compile()

@@ -1,158 +1,105 @@
 import os
 import sys
-sys.path.append(os.path.dirname(os.path.dirname( os.path.abspath(__file__))))
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from helper import get_settings
-from llm import LLMProviderFactory
-from chains import SummarizerGenPrompt, SummarizerRewriterPrompt, SummarizerMainPointPrompt
-from chains.contracts import text_output
-
+from helper.workflow_history import human_feedback_value, revision_context, revision_delta
+from chains.runtime import get_task_chain
 from .GraphState import SummaryGenState
+from langchain_core.runnables import RunnableConfig, RunnableLambda
 from langgraph.graph import StateGraph, START, END
 from langgraph.checkpoint.memory import MemorySaver
-from langgraph.types import interrupt 
+from langgraph.types import interrupt
 
-config = get_settings()
-
-def SummarizerMainPointNode(state: SummaryGenState) -> SummaryGenState:
-    llm = LLMProviderFactory(config).create(
-        config.SUMMARIZER_MAINPOINT_PROVIDER, 
-        config.SUMMARIZER_MAINPOINT_MODEL_ID, 
-        config.SUMMARIZER_MAINPOINT_TEMPERATURE
-    )
-    summarizer_main_point_llm = SummarizerMainPointPrompt | llm
-    response = summarizer_main_point_llm.invoke({"context": state["context"]})
-
-    state["Main_Points"] = text_output(response)
-
-    return state
+settings = get_settings()
 
 
-async def SummarizerMainPointNodeStream(state: SummaryGenState) -> SummaryGenState:
+def SummarizerMainPointNode(state: SummaryGenState, config: RunnableConfig = None) -> dict:
+    response = get_task_chain("main_points", settings).invoke({"context": state["context"]}, config=config)
+    return {"Main_Points": response}
 
-    llm = LLMProviderFactory(config).create(
-        config.SUMMARIZER_MAINPOINT_PROVIDER, 
-        config.SUMMARIZER_MAINPOINT_MODEL_ID, 
-        config.SUMMARIZER_MAINPOINT_TEMPERATURE
-    )
-    summarizer_main_point_llm = SummarizerMainPointPrompt | llm
-    response = await summarizer_main_point_llm.ainvoke({"context": state["context"]})
 
-    state["Main_Points"] = text_output(response)
+async def SummarizerMainPointNodeStream(state: SummaryGenState, config: RunnableConfig = None) -> dict:
+    response = await get_task_chain("main_points", settings).ainvoke({"context": state["context"]}, config=config)
+    return {"Main_Points": response}
 
-    return state
 
-def SummarizerWriterNode(state: SummaryGenState) -> SummaryGenState:
-    llm = LLMProviderFactory(config).create(
-        config.SUMMARIZER_WRITER_PROVIDER, 
-        config.SUMMARIZER_WRITER_MODEL_ID, 
-        config.SUMMARIZER_WRITER_TEMPERATURE
-    )
-    summarizer_writer_llm = SummarizerGenPrompt | llm
-    response = summarizer_writer_llm.invoke({"context": state["context"], "table_of_contents": state["Main_Points"]})
+def _writer_inputs(state):
+    return {"context": state["context"], "table_of_contents": state["Main_Points"]}
 
-    state["summary"] = text_output(response)
 
-    return state
+def SummarizerWriterNode(state: SummaryGenState, config: RunnableConfig = None) -> dict:
+    response = get_task_chain("summary", settings).invoke(_writer_inputs(state), config=config)
+    return {"summary": response}
 
-async def SummarizerWriterNodeStream(state: SummaryGenState) -> SummaryGenState:
 
-    llm = LLMProviderFactory(config).create(
-        config.SUMMARIZER_WRITER_PROVIDER, 
-        config.SUMMARIZER_WRITER_MODEL_ID, 
-        config.SUMMARIZER_WRITER_TEMPERATURE
-    )
-    summarizer_writer_llm = SummarizerGenPrompt | llm
-    response = await summarizer_writer_llm.ainvoke({"context": state["context"], "table_of_contents": state["Main_Points"]})
+async def SummarizerWriterNodeStream(state: SummaryGenState, config: RunnableConfig = None) -> dict:
+    response = await get_task_chain("summary", settings).ainvoke(_writer_inputs(state), config=config)
+    return {"summary": response}
 
-    state["summary"] = text_output(response)
 
-    return state
-
-def UserFeedbackNode(state: SummaryGenState) -> SummaryGenState:
-    interrupt_payload = {
+def UserFeedbackNode(state: SummaryGenState) -> dict:
+    user_input = interrupt({
         "table_of_contents": state["Main_Points"],
         "summary": state["summary"],
         "message": "Provide feedback or type 'save' to finish",
-        "waiting_for_input": True
-    }
- 
-    user_input = interrupt(interrupt_payload)
-    
-    state["feedback"] = user_input
-    
-    return state
-
-async def UserFeedbackNodeStream(state: SummaryGenState) -> SummaryGenState:
-    interrupt_payload = {
-        "table_of_contents": state["Main_Points"],
-        "summary": state["summary"],
-        "message": "Provide feedback or type 'save' to finish",
-        "waiting_for_input": True
-    }
-    # print(f"DEBUG: Calling interrupt() with payload: {interrupt_payload}")
-    
-    # The interrupt function pauses execution and returns the value used to resume
-    # when provide_feedback_streaming endpoint is called
-    user_input = interrupt(interrupt_payload)
-    
-    # This next log should only appear AFTER the graph is successfully resumed
-    # print(f"DEBUG: UserFeedbackNode resumed. Received feedback: {user_input}")
-    state["feedback"] = user_input
-    
-    return state
-
-def Router(state: SummaryGenState): 
-    if state.get("feedback", "").strip().casefold() == "save":
-        return  "save"
+        "waiting_for_input": True,
+    })
+    if isinstance(user_input, str):
+        feedback, review_id = user_input, None
+    elif isinstance(user_input, dict) and isinstance(user_input.get("feedback"), str):
+        feedback, review_id = user_input["feedback"], user_input.get("review_id")
+        if review_id is not None and not isinstance(review_id, str):
+            raise ValueError("A feedback review_id must be text")
     else:
-        return "feedback"
+        raise ValueError("Human feedback must be text or a feedback review object")
+    return {
+        "feedback": feedback,
+        "human_feedback_text": feedback,
+        "critic_feedback": None,
+        "feedback_review_id": review_id,
+        "state_version": 4,
+    }
 
-def SummarizerRewriterNode(state: SummaryGenState) -> SummaryGenState:
-    state["old_summary"] = state["summary"] 
 
-    llm = LLMProviderFactory(config).create(
-        config.SUMMARIZER_REWRITER_PROVIDER, 
-        config.SUMMARIZER_REWRITER_MODEL_ID, 
-        config.SUMMARIZER_REWRITER_TEMPERATURE
-    )
-    summarizer_rewriter_llm = SummarizerRewriterPrompt | llm
-    response = summarizer_rewriter_llm.invoke({
-        "context": state["context"], 
-        "original_summary": state["old_summary"],
-        "user_feedback": state["feedback"]
-    })
-    
-    state["summary"] = text_output(response)
+async def UserFeedbackNodeStream(state: SummaryGenState) -> dict:
+    return UserFeedbackNode(state)
 
-    return state
 
-async def SummarizerRewriterNodeStream(state: SummaryGenState) -> SummaryGenState:
-    state["old_summary"] = state["summary"] 
+def Router(state: SummaryGenState) -> str:
+    return "save" if human_feedback_value(state).strip().casefold() == "save" else "feedback"
 
-    llm = LLMProviderFactory(config).create(
-        config.SUMMARIZER_REWRITER_PROVIDER, 
-        config.SUMMARIZER_REWRITER_MODEL_ID, 
-        config.SUMMARIZER_REWRITER_TEMPERATURE
-    )
-    summarizer_rewriter_llm = SummarizerRewriterPrompt | llm
-    response = await summarizer_rewriter_llm.ainvoke({
-        "context": state["context"], 
-        "original_summary": state["old_summary"],
-        "user_feedback": state["feedback"]
-    })
-    
-    state["summary"] = text_output(response)
 
-    return state
+def _revision_inputs(state):
+    return {
+        "context": state["context"],
+        "original_summary": state["summary"],
+        "user_feedback": {
+            "current": human_feedback_value(state),
+            "prior": revision_context(state, settings),
+        },
+    }
+
+
+def _revision_delta(state, response):
+    return {"summary": response, **revision_delta(state, settings, draft=response, status="revised")}
+
+
+def SummarizerRewriterNode(state: SummaryGenState, config: RunnableConfig = None) -> dict:
+    response = get_task_chain("summary_revision", settings).invoke(_revision_inputs(state), config=config)
+    return _revision_delta(state, response)
+
+
+async def SummarizerRewriterNodeStream(state: SummaryGenState, config: RunnableConfig = None) -> dict:
+    response = await get_task_chain("summary_revision", settings).ainvoke(_revision_inputs(state), config=config)
+    return _revision_delta(state, response)
+
 
 stream_graph = StateGraph(SummaryGenState)
-
-stream_graph.add_node("main_point_summarizer", SummarizerMainPointNodeStream)
-stream_graph.add_node("summarizer_writer", SummarizerWriterNodeStream)
-stream_graph.add_node("user_feedback", UserFeedbackNodeStream)
-stream_graph.add_node("summarizer_rewriter", SummarizerRewriterNodeStream)
-
+stream_graph.add_node("main_point_summarizer", RunnableLambda(SummarizerMainPointNode, afunc=SummarizerMainPointNodeStream))
+stream_graph.add_node("summarizer_writer", RunnableLambda(SummarizerWriterNode, afunc=SummarizerWriterNodeStream))
+stream_graph.add_node("user_feedback", RunnableLambda(UserFeedbackNode, afunc=UserFeedbackNodeStream))
+stream_graph.add_node("summarizer_rewriter", RunnableLambda(SummarizerRewriterNode, afunc=SummarizerRewriterNodeStream))
 stream_graph.add_edge(START, "main_point_summarizer")
 stream_graph.add_edge("main_point_summarizer", "summarizer_writer")
 stream_graph.add_edge("summarizer_writer", "user_feedback")
@@ -161,20 +108,5 @@ stream_graph.add_edge("summarizer_rewriter", "user_feedback")
 
 checkpointer = MemorySaver()
 stream_summarizer_graph = stream_graph.compile(checkpointer=checkpointer)
-
-graph = StateGraph(SummaryGenState)
-graph.add_node("main_point_summarizer", SummarizerMainPointNode)
-graph.add_node("summarizer_writer", SummarizerWriterNode)
-graph.add_node("user_feedback", UserFeedbackNode)
-graph.add_node("summarizer_rewriter", SummarizerRewriterNode)
-
-graph.add_edge(START, "main_point_summarizer")
-graph.add_edge("main_point_summarizer", "summarizer_writer")
-graph.add_edge("summarizer_writer", "user_feedback")
-graph.add_conditional_edges("user_feedback", Router, {"save": END, "feedback": "summarizer_rewriter"})
-graph.add_edge("summarizer_rewriter", "user_feedback")
-
+graph = stream_graph
 summarizer_graph = graph.compile()
-
-# from IPython.display import display, Image
-# display(Image(summarizer_graph.get_graph().draw_mermaid_png()))
