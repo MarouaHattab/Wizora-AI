@@ -55,9 +55,18 @@ def serialize_evidence(documents: Sequence[Document]) -> str:
 
 
 def prepare_conversation_history(
-    history: Sequence[BaseMessage], question: str
+    history: Sequence[BaseMessage], question: str, *,
+    history_messages: int = MAX_HISTORY_MESSAGES,
+    history_characters: int = MAX_HISTORY_CHARACTERS,
 ) -> list[BaseMessage]:
     """Pass only bounded conversational text through the message placeholder."""
+    if (
+        type(history_messages) is not int or history_messages < 2
+        or type(history_characters) is not int or history_characters < 1
+    ):
+        raise ValueError("Invalid conversation context budget")
+    if not isinstance(history, (list, tuple)):
+        history = []
     messages = []
     for message in history:
         if not isinstance(message, (HumanMessage, AIMessage)):
@@ -73,26 +82,35 @@ def prepare_conversation_history(
     if messages and isinstance(messages[-1], HumanMessage) and messages[-1].content == question:
         messages.pop()
 
+    turns = []
+    for message in messages:
+        if isinstance(message, HumanMessage):
+            turns.append([message])
+        elif turns and len(turns[-1]) == 1:
+            turns[-1].append(message)
+    turns = [turn for turn in turns if len(turn) == 2]
     selected = []
-    remaining = MAX_HISTORY_CHARACTERS
-    for message in reversed(messages[-MAX_HISTORY_MESSAGES:]):
-        content = message.content
-        if len(content) > remaining:
+    order = [len(turns) - 1, 0, *range(len(turns) - 2, 0, -1)] if len(turns) > 1 else [0]
+    for index in dict.fromkeys(order):
+        if not turns:
             break
-        selected.append(message)
-        remaining -= len(content)
-    selected.reverse()
-    while selected and isinstance(selected[0], AIMessage):
-        selected.pop(0)
-    return selected
+        candidate = selected + [(index, turns[index])]
+        flattened = [message for _, turn in candidate for message in turn]
+        if len(flattened) <= history_messages and sum(len(message.content) for message in flattened) <= history_characters:
+            selected = candidate
+    return [message for _, turn in sorted(selected) for message in turn]
 
 
 def prepare_question_answer_inputs(
-    documents: Sequence[Document], question: str, history: Sequence[BaseMessage]
+    documents: Sequence[Document], question: str, history: Sequence[BaseMessage], *,
+    history_messages: int = MAX_HISTORY_MESSAGES,
+    history_characters: int = MAX_HISTORY_CHARACTERS,
 ) -> dict:
     question = text_output(question)
     return {
         "evidence": serialize_evidence(documents),
-        "chat_history": prepare_conversation_history(history, question),
+        "chat_history": prepare_conversation_history(
+            history, question, history_messages=history_messages, history_characters=history_characters,
+        ),
         "question": question,
     }
