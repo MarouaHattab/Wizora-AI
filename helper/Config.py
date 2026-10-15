@@ -1,7 +1,7 @@
 from pathlib import Path
 from typing import Annotated, Literal
 
-from pydantic import Field, SecretStr, StringConstraints, field_validator
+from pydantic import Field, SecretStr, StringConstraints, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 ModelName = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
@@ -62,6 +62,18 @@ class Settings(BaseSettings):
     CHUNK_OVERLAP: int = Field(ge=0)
     CHUNKING_STRATEGY: Literal["recursive", "token"] = "recursive"
 
+    LLM_TIMEOUT_SECONDS: float = Field(default=60, gt=0, allow_inf_nan=False)
+    GRAPH_TIMEOUT_SECONDS: float = Field(default=180, gt=0, allow_inf_nan=False)
+    QA_HISTORY_MESSAGES: int = Field(default=12, ge=2)
+    QA_HISTORY_CHARACTERS: int = Field(default=12000, ge=256)
+    QA_RETENTION_MESSAGES: int = Field(default=40, ge=2)
+    QA_RETENTION_CHARACTERS: int = Field(default=48000, ge=256)
+    REVISION_HISTORY_LIMIT: int = Field(default=8, gt=0)
+    REVISION_HISTORY_CHARACTERS: int = Field(default=12000, ge=1024)
+    REVISION_CONTEXT_RECORDS: int = Field(default=3, gt=0)
+    REVISION_CONTEXT_CHARACTERS: int = Field(default=6000, ge=512)
+    REVISION_REQUIREMENTS_CHARACTERS: int = Field(default=8000, ge=512)
+
     model_config = SettingsConfigDict(env_file=Path(__file__).resolve().parents[1] / ".env")
 
     @field_validator(
@@ -90,6 +102,18 @@ class Settings(BaseSettings):
         if size is not None and value >= size:
             raise ValueError("CHUNK_OVERLAP must be smaller than CHUNK_SIZE")
         return value
+
+    @model_validator(mode="after")
+    def validate_history_budgets(self):
+        if self.QA_RETENTION_MESSAGES < self.QA_HISTORY_MESSAGES:
+            raise ValueError("QA_RETENTION_MESSAGES must cover QA_HISTORY_MESSAGES")
+        if self.QA_RETENTION_CHARACTERS < self.QA_HISTORY_CHARACTERS:
+            raise ValueError("QA_RETENTION_CHARACTERS must cover QA_HISTORY_CHARACTERS")
+        if self.REVISION_HISTORY_LIMIT < self.REVISION_CONTEXT_RECORDS:
+            raise ValueError("REVISION_HISTORY_LIMIT must cover REVISION_CONTEXT_RECORDS")
+        if self.REVISION_HISTORY_CHARACTERS < self.REVISION_CONTEXT_CHARACTERS:
+            raise ValueError("REVISION_HISTORY_CHARACTERS must cover REVISION_CONTEXT_CHARACTERS")
+        return self
 
 def get_settings():
     return Settings()
