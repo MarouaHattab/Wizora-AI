@@ -5,6 +5,7 @@ sys.path.append(os.path.dirname(os.path.dirname( os.path.abspath(__file__))))
 from helper import get_settings
 from llm import LLMProviderFactory
 from chains import SummarizerGenPrompt, SummarizerRewriterPrompt, SummarizerMainPointPrompt
+from chains.contracts import text_output
 
 from .GraphState import SummaryGenState
 from langgraph.graph import StateGraph, START, END
@@ -22,7 +23,7 @@ def SummarizerMainPointNode(state: SummaryGenState) -> SummaryGenState:
     summarizer_main_point_llm = SummarizerMainPointPrompt | llm
     response = summarizer_main_point_llm.invoke({"context": state["context"]})
 
-    state["Main_Points"] = response
+    state["Main_Points"] = text_output(response)
 
     return state
 
@@ -37,7 +38,7 @@ async def SummarizerMainPointNodeStream(state: SummaryGenState) -> SummaryGenSta
     summarizer_main_point_llm = SummarizerMainPointPrompt | llm
     response = await summarizer_main_point_llm.ainvoke({"context": state["context"]})
 
-    state["Main_Points"] = response.content if hasattr(response, 'content') else str(response)
+    state["Main_Points"] = text_output(response)
 
     return state
 
@@ -50,7 +51,7 @@ def SummarizerWriterNode(state: SummaryGenState) -> SummaryGenState:
     summarizer_writer_llm = SummarizerGenPrompt | llm
     response = summarizer_writer_llm.invoke({"context": state["context"], "table_of_contents": state["Main_Points"]})
 
-    state["summary"] = response
+    state["summary"] = text_output(response)
 
     return state
 
@@ -64,7 +65,7 @@ async def SummarizerWriterNodeStream(state: SummaryGenState) -> SummaryGenState:
     summarizer_writer_llm = SummarizerGenPrompt | llm
     response = await summarizer_writer_llm.ainvoke({"context": state["context"], "table_of_contents": state["Main_Points"]})
 
-    state["summary"] = response.content if hasattr(response, 'content') else str(response)
+    state["summary"] = text_output(response)
 
     return state
 
@@ -122,7 +123,7 @@ def SummarizerRewriterNode(state: SummaryGenState) -> SummaryGenState:
         "user_feedback": state["feedback"]
     })
     
-    state["summary"] = response.content if hasattr(response, 'content') else str(response)
+    state["summary"] = text_output(response)
 
     return state
 
@@ -141,7 +142,7 @@ async def SummarizerRewriterNodeStream(state: SummaryGenState) -> SummaryGenStat
         "user_feedback": state["feedback"]
     })
     
-    state["summary"] = response.content if hasattr(response, 'content') else str(response)
+    state["summary"] = text_output(response)
 
     return state
 
