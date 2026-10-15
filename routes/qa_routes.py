@@ -1,4 +1,5 @@
 import logging
+import sqlite3
 import time
 import uuid
 
@@ -6,22 +7,35 @@ from fastapi import APIRouter, Body, HTTPException
 from langchain_core.messages import AIMessage, HumanMessage
 
 from controllers.GraphState import QuestionAnswerState
-from controllers.QuestionAnswerGraphController import message_text, stream_qa_graph as qa_graph
+from controllers.QuestionAnswerGraphController import message_text
 from helper import get_settings
 from helper.asset_http import read_asset_text
+from helper.failures import StorageUnavailable
 from helper.session_review import SessionStreamingResponse, acquire_session, session_status
 from helper.sse import EventStream, EventVersion, before_deadline, close_events, events_before, public_error
 from helper.workflow_history import canonical_messages
+from helper.workflow_metrics import metrics
+from helper.workflow_runtime import note_snapshot, require_graph
 
 router = APIRouter()
 settings = get_settings()
 logger = logging.getLogger(__name__)
 
 
-def _stream_response(payload, config, metadata, session_lock, event_version: EventVersion = "legacy"):
+_QA_NODES = {
+    "understand_query", "retrieve", "assess_evidence", "corrective_retrieval",
+    "generate_answer_streaming", "validate_grounding", "off_topic_response",
+}
+
+
+def _stream_response(payload, config, metadata, session_lock, graph, event_version: EventVersion = "legacy"):
     async def generate():
         stream = EventStream(config["configurable"]["thread_id"], event_version)
         iterator = None
+        failure = None
+        started = time.perf_counter()
+        node_started = {}
+        snapshot = None
         try:
             yield stream.emit(
                 "session_started", data=metadata,
@@ -29,10 +43,19 @@ def _stream_response(payload, config, metadata, session_lock, event_version: Eve
             )
             deadline = time.monotonic() + settings.GRAPH_TIMEOUT_SECONDS
             streamed_text = ""
-            iterator = qa_graph.astream_events(payload, config=config, version="v2")
+            iterator = graph.astream_events(payload, config=config, version="v2")
             async for event in events_before(iterator, deadline):
                 event_type = event.get("event")
                 node = event.get("metadata", {}).get("langgraph_node")
+                event_name = event.get("name")
+                timed = event_name if event_name in _QA_NODES else node
+                if event_type == "on_chain_start" and timed in _QA_NODES:
+                    node_started[timed] = time.perf_counter()
+                elif event_type == "on_chain_end" and timed in node_started:
+                    metrics.observe(
+                        "node_ms", (time.perf_counter() - node_started.pop(timed)) * 1000,
+                        workflow="qa", node=timed,
+                    )
                 if event_type == "on_chain_start" and (
                     event.get("name") in {"validate_grounding", "off_topic_response"}
                     or node in {"validate_grounding", "off_topic_response"}
@@ -41,7 +64,7 @@ def _stream_response(payload, config, metadata, session_lock, event_version: Eve
                     if frame:
                         yield frame
 
-            snapshot = await before_deadline(qa_graph.aget_state(config), deadline)
+            snapshot = await before_deadline(graph.aget_state(config), deadline)
             status = session_status(snapshot)
             if status == "interrupted_for_feedback":
                 yield stream.emit(
@@ -76,6 +99,7 @@ def _stream_response(payload, config, metadata, session_lock, event_version: Eve
                 },
             )
         except Exception as error:
+            failure = error
             public = public_error(error)
             logger.warning(
                 "QA stream failed (category=%s, exception_type=%s, run_id=%s)",
@@ -91,7 +115,13 @@ def _stream_response(payload, config, metadata, session_lock, event_version: Eve
             try:
                 await close_events(iterator)
             finally:
-                session_lock.release()
+                try:
+                    note_snapshot(
+                        "qa", config["configurable"]["thread_id"], snapshot,
+                        started=started, error=failure, request_id=stream.run_id,
+                    )
+                finally:
+                    session_lock.release()
 
     return SessionStreamingResponse(
         generate(), session_lock=session_lock, media_type="text/event-stream",
@@ -118,10 +148,11 @@ async def start_qa_session_stream(
         relevant_text=[], on_topic="", context=context, state_version=4, history_trimmed=0,
     )
     config = {"configurable": {"thread_id": thread_id}, "recursion_limit": 12}
+    graph = require_graph("qa")
     session_lock = acquire_session("qa", thread_id)
     return _stream_response(
         initial_state, config, {"thread_id": thread_id, "asset_id": asset_id},
-        session_lock, event_version,
+        session_lock, graph, event_version,
     )
 
 
@@ -134,9 +165,10 @@ async def continue_qa_conversation_stream(
     if not next_question.strip():
         raise HTTPException(status_code=422, detail="Question must not be empty")
     config = {"configurable": {"thread_id": thread_id}, "recursion_limit": 12}
+    graph = require_graph("qa")
     session_lock = acquire_session("qa", thread_id)
     try:
-        snapshot = await qa_graph.aget_state(config)
+        snapshot = await graph.aget_state(config)
         status = session_status(snapshot)
         if status == "not_found":
             raise HTTPException(status_code=404, detail="Session not found. Start a new session.")
@@ -149,7 +181,14 @@ async def continue_qa_conversation_stream(
         if not messages or not isinstance(messages[-1], AIMessage):
             raise HTTPException(status_code=409, detail="Session has no completed answer")
         payload = {"messages": [HumanMessage(content=next_question, id=str(uuid.uuid4()))]}
-        return _stream_response(payload, config, {"thread_id": thread_id}, session_lock, event_version)
+        metrics.increment("workflow_continue", workflow="qa")
+        return _stream_response(payload, config, {"thread_id": thread_id}, session_lock, graph, event_version)
+    except HTTPException:
+        session_lock.release()
+        raise
+    except (StorageUnavailable, sqlite3.OperationalError):
+        session_lock.release()
+        raise HTTPException(status_code=503, detail="Workflow storage is unavailable") from None
     except BaseException:
         session_lock.release()
         raise

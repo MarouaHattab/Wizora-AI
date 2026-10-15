@@ -1,3 +1,4 @@
+import logging
 from pathlib import Path
 from typing import Annotated, Literal
 
@@ -75,6 +76,10 @@ class Settings(BaseSettings):
     REVISION_REQUIREMENTS_CHARACTERS: int = Field(default=8000, ge=512)
     AUTO_REVISION_LIMIT: int = Field(default=1, ge=0, le=3)
     REFINE_MODEL_CALL_LIMIT: int = Field(default=3, ge=1, le=6)
+    CHECKPOINT_DATABASE: str = "runtime/checkpoints.sqlite"
+    LOG_LEVEL: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "INFO"
+    SESSION_RETENTION_DAYS: int = Field(default=0, ge=0, le=3650)
+    SESSION_LEASE_SECONDS: float = Field(default=210, gt=0, allow_inf_nan=False)
 
     RAG_RETRIEVAL_STRATEGY: Literal["mmr", "similarity"] = "mmr"
     RAG_TOP_K: int = Field(default=5, ge=1, le=20)
@@ -117,6 +122,16 @@ class Settings(BaseSettings):
     def empty_secret(cls, value):
         return None if isinstance(value, str) and not value.strip() else value
 
+    @field_validator("LOG_LEVEL", mode="before")
+    @classmethod
+    def normalize_log_level(cls, value):
+        return value.strip().upper() if isinstance(value, str) else value
+
+    @field_validator("CHECKPOINT_DATABASE", mode="before")
+    @classmethod
+    def normalize_checkpoint_path(cls, value):
+        return value.strip() if isinstance(value, str) else value
+
     @field_validator("CHUNK_OVERLAP")
     @classmethod
     def validate_overlap(cls, value, info):
@@ -142,12 +157,22 @@ class Settings(BaseSettings):
             raise ValueError("RAG context must reserve space for instructions, evidence and output")
         return self
 
+    @model_validator(mode="after")
+    def validate_runtime(self):
+        if not self.CHECKPOINT_DATABASE:
+            raise ValueError("CHECKPOINT_DATABASE is required")
+        if self.SESSION_LEASE_SECONDS <= self.GRAPH_TIMEOUT_SECONDS:
+            raise ValueError("SESSION_LEASE_SECONDS must be greater than GRAPH_TIMEOUT_SECONDS")
+        return self
+
 def get_settings():
     return Settings()
 
 def print_env_variables():
     settings = get_settings()
-    for key, value in settings:
-        if isinstance(value, SecretStr) or key.endswith(("_API_KEY", "_TOKEN")):
+    visible = settings.model_dump()
+    logger = logging.getLogger("wizora.config")
+    for key, value in visible.items():
+        if isinstance(getattr(settings, key, None), SecretStr) or key.endswith(("_API_KEY", "_TOKEN")):
             value = "<set>" if value else "<not set>"
-        print(f"{key}: {value}")
+        logger.debug("%s=%s", key, value)

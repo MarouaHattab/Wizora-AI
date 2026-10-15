@@ -1,8 +1,10 @@
+import logging
 import os
 import sys
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from helper import get_settings
+from helper.workflow_metrics import metrics
 from helper.question_review import (
     REVIEW_MESSAGE,
     accepted_feedback,
@@ -28,10 +30,10 @@ from chains.runtime import get_task_chain
 from .GraphState import QuestionGenState
 from langchain_core.runnables import RunnableConfig, RunnableLambda
 from langgraph.graph import StateGraph, START, END
-from langgraph.checkpoint.memory import MemorySaver
 from langgraph.types import interrupt
 
 settings = get_settings()
+logger = logging.getLogger("wizora.question")
 
 
 def current_question(state):
@@ -192,14 +194,19 @@ async def QuestionRefinerStream(state: QuestionGenState, config: RunnableConfig 
 
 
 def route_after_critique(state: QuestionGenState) -> str:
-    if state.get("revision_limit_reached") or refine_budget_exhausted(state, settings, extra_calls=1):
-        return "review"
-    critic = critic_feedback_value(state)
-    if critic is None:
-        raise StructuredOutputError("Automatic refinement requires a validated critic decision")
-    if needs_revision(critic):
-        return "rewrite"
-    return "review"
+    limited = bool(state.get("revision_limit_reached") or refine_budget_exhausted(state, settings, extra_calls=1))
+    if limited:
+        decision = "review"
+    else:
+        critic = critic_feedback_value(state)
+        if critic is None:
+            raise StructuredOutputError("Automatic refinement requires a validated critic decision")
+        decision = "rewrite" if needs_revision(critic) else "review"
+    metrics.increment("graph_route", workflow="question_generation", decision=decision)
+    if limited:
+        metrics.increment("reflection_stopped", workflow="question_generation")
+    logger.info("question review decision=%s limit=%s", decision, limited)
+    return decision
 
 
 def _revision_inputs(state):
@@ -327,6 +334,6 @@ graph.add_conditional_edges(
 )
 graph.add_edge("question_rewriter", "human_feedback")
 
-checkpointer = MemorySaver()
-qg_graph = graph.compile(checkpointer=checkpointer)
-graph = graph.compile()
+
+def compile_question_graph(checkpointer):
+    return graph.compile(checkpointer=checkpointer)

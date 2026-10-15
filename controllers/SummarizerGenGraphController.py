@@ -1,8 +1,10 @@
+import logging
 import os
 import sys
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from helper import get_settings
+from helper.workflow_metrics import metrics
 from helper.summary_revision import classify_summary_feedback
 from helper.workflow_history import human_feedback_value, revision_context, revision_delta
 from chains.contracts import ChainInputError, ProviderExecutionError, StructuredOutputError
@@ -10,10 +12,10 @@ from chains.runtime import get_task_chain
 from .GraphState import SummaryGenState
 from langchain_core.runnables import RunnableConfig, RunnableLambda
 from langgraph.graph import StateGraph, START, END
-from langgraph.checkpoint.memory import MemorySaver
 from langgraph.types import interrupt
 
 settings = get_settings()
+logger = logging.getLogger("wizora.summary")
 
 
 def SummarizerMainPointNode(state: SummaryGenState, config: RunnableConfig = None) -> dict:
@@ -82,9 +84,13 @@ async def UserFeedbackNodeStream(state: SummaryGenState) -> dict:
 
 def Router(state: SummaryGenState) -> str:
     if state.get("workflow_action") == "accept" or human_feedback_value(state).strip().casefold() in {"save", "accept"}:
-        return "save"
-    kind = state.get("revision_kind") or classify_summary_feedback(human_feedback_value(state))
-    return "structural" if kind == "structural" else "wording"
+        decision = "save"
+    else:
+        kind = state.get("revision_kind") or classify_summary_feedback(human_feedback_value(state))
+        decision = "structural" if kind == "structural" else "wording"
+    metrics.increment("graph_route", workflow="summarization", decision=decision)
+    logger.info("summary review decision=%s", decision)
+    return decision
 
 
 def _revision_inputs(state):
@@ -190,7 +196,6 @@ stream_graph.add_conditional_edges(
 stream_graph.add_edge("summarizer_rewriter", "user_feedback")
 stream_graph.add_edge("summarizer_structure", "user_feedback")
 
-checkpointer = MemorySaver()
-stream_summarizer_graph = stream_graph.compile(checkpointer=checkpointer)
-graph = stream_graph
-summarizer_graph = graph.compile()
+
+def compile_summary_graph(checkpointer):
+    return stream_graph.compile(checkpointer=checkpointer)

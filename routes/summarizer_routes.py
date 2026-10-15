@@ -1,4 +1,5 @@
 import logging
+import sqlite3
 import time
 import uuid
 from typing import AsyncGenerator
@@ -9,14 +10,16 @@ from langgraph.types import Command
 
 from chains.contracts import text_fragment, text_output
 from controllers.GraphState import SummaryGenState
-from controllers.SummarizerGenGraphController import stream_summarizer_graph as summarizer_graph
 from helper import get_settings
 from helper.asset_http import read_asset_text
+from helper.failures import StorageUnavailable
 from helper.session_review import (
     SessionStreamingResponse, accept_feedback, acquire_session,
     review_revision, session_status, validate_feedback,
 )
 from helper.sse import EventStream, EventVersion, before_deadline, close_events, events_before, public_error
+from helper.workflow_metrics import metrics
+from helper.workflow_runtime import note_snapshot, require_graph
 
 router = APIRouter()
 settings = get_settings()
@@ -38,7 +41,7 @@ def summary_feedback(snapshot):
 
 
 async def stream_session(
-    thread_id, graph_input, config, lock, initial_status, review=None,
+    thread_id, graph_input, config, lock, initial_status, graph, review=None,
     event_version: EventVersion = "legacy",
 ) -> AsyncGenerator[str, None]:
     public_nodes = {
@@ -51,6 +54,9 @@ async def stream_session(
     status = "failed"
     iterator = None
     stage_text = {}
+    stage_started = {}
+    failure = None
+    started = time.perf_counter()
     try:
         yield stream.emit(
             "session_started", data={"status": initial_status},
@@ -59,11 +65,12 @@ async def stream_session(
         deadline = time.monotonic() + settings.GRAPH_TIMEOUT_SECONDS
         if review is not None:
             accept_feedback("summarization", thread_id, *review)
-        iterator = summarizer_graph.astream_events(graph_input, config=config, version="v2")
+        iterator = graph.astream_events(graph_input, config=config, version="v2")
         async for event in events_before(iterator, deadline):
             event_type = event.get("event")
             event_name = event.get("name", "")
             if event_type == "on_chain_start" and event_name in public_nodes:
+                stage_started[event_name] = time.perf_counter()
                 if event_name in token_nodes:
                     stage_text[event_name] = ""
                 yield stream.emit(
@@ -87,7 +94,14 @@ async def stream_session(
                             "token": content, "status_update": node,
                         },
                     )
-            elif event_type == "on_chain_end" and event_name in token_nodes:
+            elif event_type == "on_chain_end" and event_name in public_nodes:
+                if event_name in stage_started:
+                    metrics.observe(
+                        "node_ms", (time.perf_counter() - stage_started[event_name]) * 1000,
+                        workflow="summarization", node=event_name,
+                    )
+                if event_name not in token_nodes:
+                    continue
                 output = event.get("data", {}).get("output")
                 field = "Main_Points" if event_name == "main_point_summarizer" else "summary"
                 if not isinstance(output, dict) or field not in output:
@@ -107,7 +121,7 @@ async def stream_session(
                         },
                     )
 
-        snapshot = await before_deadline(summarizer_graph.aget_state(config), deadline)
+        snapshot = await before_deadline(graph.aget_state(config), deadline)
         status = session_status(snapshot)
         if status == "interrupted_for_feedback":
             draft = summary_feedback(snapshot)
@@ -133,6 +147,7 @@ async def stream_session(
         else:
             raise ValueError("Summarization did not reach a review or completion")
     except Exception as error:
+        failure = error
         status = "failed"
         public = public_error(error)
         logger.warning(
@@ -149,7 +164,13 @@ async def stream_session(
         try:
             await close_events(iterator)
         finally:
-            lock.release()
+            try:
+                note_snapshot(
+                    "summarization", thread_id, snapshot, started=started,
+                    error=failure, request_id=stream.run_id,
+                )
+            finally:
+                lock.release()
 
     if status != "completed":
         frame = stream.transport_closed({
@@ -173,9 +194,13 @@ async def start_summarization_session_streaming(
         history=[], revision_requirements=[], state_version=4,
     )
     config = {"configurable": {"thread_id": thread_id}}
+    graph = require_graph("summarization")
     lock = acquire_session("summarization", thread_id)
     return SessionStreamingResponse(
-        stream_session(thread_id, initial_state, config, lock, "starting_session", event_version=event_version),
+        stream_session(
+            thread_id, initial_state, config, lock, "starting_session", graph,
+            event_version=event_version,
+        ),
         session_lock=lock, media_type="text/event-stream",
     )
 
@@ -188,13 +213,18 @@ async def provide_feedback_to_summarization_streaming(
     event_version: EventVersion = Body("legacy", embed=True),
 ) -> StreamingResponse:
     config = {"configurable": {"thread_id": thread_id}}
+    graph = require_graph("summarization")
     lock = acquire_session("summarization", thread_id)
     try:
-        snapshot = await summarizer_graph.aget_state(config)
+        snapshot = await graph.aget_state(config)
         validate_feedback("summarization", thread_id, snapshot, feedback, review_id)
+        metrics.increment("workflow_resume", workflow="summarization")
     except HTTPException:
         lock.release()
         raise
+    except (StorageUnavailable, sqlite3.OperationalError):
+        lock.release()
+        raise HTTPException(status_code=503, detail="Workflow storage is unavailable") from None
     except Exception:
         lock.release()
         raise HTTPException(status_code=500, detail="Unable to validate summarization session") from None
@@ -205,7 +235,8 @@ async def provide_feedback_to_summarization_streaming(
         stream_session(
             thread_id,
             Command(resume={"feedback": feedback, "review_id": review_revision(snapshot)}),
-            config, lock, "resuming_with_feedback", review=(snapshot, feedback, review_id),
+            config, lock, "resuming_with_feedback", graph,
+            review=(snapshot, feedback, review_id),
             event_version=event_version,
         ),
         session_lock=lock, media_type="text/event-stream",

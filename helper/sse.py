@@ -10,7 +10,10 @@ from fastapi import HTTPException
 from httpx import TimeoutException
 from pydantic import ValidationError
 
-from chains.contracts import ChainInputError
+import sqlite3
+
+from chains.contracts import ChainInputError, ProviderExecutionError, StructuredOutputError
+from helper.failures import StorageUnavailable
 
 EventVersion = Literal["legacy", "v1"]
 TERMINAL_EVENTS = {"awaiting_feedback", "completed", "failed"}
@@ -58,11 +61,21 @@ def public_error(error):
         cause = getattr(cause, "__cause__", None)
         if cause is None:
             break
+    if isinstance(error, (StorageUnavailable, sqlite3.OperationalError)):
+        return {"category": "storage", "detail": "Workflow storage is unavailable"}
+    if isinstance(error, HTTPException) and error.status_code == 503:
+        return {"category": "storage", "detail": "Workflow storage is unavailable"}
+    if isinstance(error, HTTPException) and error.status_code == 409:
+        return {"category": "conflict", "detail": "The session request conflicted with the current state"}
     if isinstance(error, (HTTPException, ChainInputError)):
         return {"category": "input", "detail": "The workflow input could not be accepted"}
+    if isinstance(error, StructuredOutputError):
+        return {"category": "structured_output", "detail": "The model returned an invalid result"}
     if isinstance(error, (ValidationError, ValueError, TypeError)):
         return {"category": "validation", "detail": "The workflow returned an invalid result"}
-    return {"category": "provider", "detail": "The model provider could not complete the workflow"}
+    if isinstance(error, ProviderExecutionError):
+        return {"category": "provider", "detail": "The model provider could not complete the workflow"}
+    return {"category": "workflow", "detail": "The workflow could not be completed"}
 
 
 async def before_deadline(awaitable, deadline):

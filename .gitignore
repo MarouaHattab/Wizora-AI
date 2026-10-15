@@ -20,6 +20,7 @@ __pycache__/
 
 # Local runtime data and tooling
 /assets/
+/runtime/
 /.uv-cache/
 /.uv-python/
 /.cache/

@@ -9,6 +9,7 @@ from langchain_core.runnables import Runnable
 from pydantic import SecretStr
 
 from chains.contracts import ChainInputError, ProviderExecutionError
+from helper.llm_observation import observe_chain
 from llm.LLMProviderFactory import LLMProviderFactory
 from .builders import build_task_chain
 
@@ -143,7 +144,10 @@ def get_task_chain(task: str, settings, *, llm=None) -> Runnable:
             _chains.move_to_end(chain_key)
             return _chains[chain_key][0]
         model = _resolve_model(settings, model_key)
-        chain = build_task_chain(task, model)
+        _, provider, model_id, _, _, _ = model_key
+        chain = observe_chain(
+            build_task_chain(task, model), task=task, provider=provider, model=model_id,
+        )
         _remember(_chains, chain_key, (chain, model), _CHAIN_LIMIT)
         return chain
 

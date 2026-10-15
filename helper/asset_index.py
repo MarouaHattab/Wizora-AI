@@ -465,6 +465,8 @@ def ensure_asset_index(
             previous = _live_indexes.get(index_version)
         if previous is not None and _is_complete(previous):
             _remember(previous)
+            from helper.workflow_metrics import metrics
+            metrics.increment("index_reuse")
             return previous
         if previous is not None:
             with _cache_lock:

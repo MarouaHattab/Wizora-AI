@@ -6,8 +6,9 @@ import anyio
 from langchain_core.messages import HumanMessage
 from langchain_core.runnables import RunnableConfig, RunnableLambda
 from langchain_core.runnables.config import merge_configs
-from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, START, StateGraph
+
+from helper.workflow_metrics import metrics
 
 from chains.contracts import ChainInputError, ProviderExecutionError, StructuredOutputError, structured_output, text_fragment, text_output
 from chains.runtime import get_task_chain, get_task_token_counter
@@ -199,6 +200,9 @@ def _retrieval_delta(state, hits, version, elapsed, corrective, issue=None):
     retrieved = list(dict.fromkeys([*(state.get("retrieved_ids", []) if corrective else []), *(_chunk_id(hit.document) for hit in hits)]))
     previous = [_chunk_id(document) for document in state.get("relevant_text", [])] if corrective else []
     logger.info("QA retrieval (pass=%d, candidates=%d, selected=%d, elapsed_ms=%.2f)", int(corrective), len(hits), len(selected), elapsed)
+    metrics.increment("rag_retrieval", workflow="qa", corrective=str(bool(corrective)).lower())
+    metrics.observe("rag_retrieval_ms", round(elapsed, 3), workflow="qa")
+    metrics.increment("rag_chunks_selected", amount=len(selected), workflow="qa")
     return {
         "relevant_text": selected, "index_version": version, "retrieval_pass": int(corrective),
         "retrieval_issue": issue,
@@ -253,6 +257,7 @@ def _deterministic_decision(state):
 
 
 def _decision_delta(state, decision, call=None):
+    metrics.increment("rag_evidence", workflow="qa", status=decision.status)
     return {"evidence_decision": decision, "on_topic": "No" if decision.status == "off_topic" else "Yes",
             "rag_diagnostics": _diagnostics(state, call, evidence_status=decision.status)}
 
@@ -276,10 +281,14 @@ async def assess_evidence_async(state: QuestionAnswerState, config: RunnableConf
 def evidence_router(state):
     status = _decision(state).status
     if status in {"supported", "partial"}:
-        return "answer"
-    if status == "insufficient" and not state.get("retrieval_issue") and state["retrieval_pass"] < settings.RAG_CORRECTIVE_PASSES:
-        return "correct"
-    return "abstain"
+        decision = "answer"
+    elif status == "insufficient" and not state.get("retrieval_issue") and state["retrieval_pass"] < settings.RAG_CORRECTIVE_PASSES:
+        decision = "correct"
+    else:
+        decision = "abstain"
+    metrics.increment("graph_route", workflow="qa", decision=decision)
+    logger.info("qa evidence route=%s status=%s", decision, status)
+    return decision
 
 
 def _answer_inputs(state):
@@ -322,6 +331,7 @@ def _grounding_inputs(state):
 
 
 def _rejected_grounding(state, call=None):
+    metrics.increment("rag_grounding", workflow="qa", status="rejected")
     return {**message_delta(state, UNVERIFIED, settings), "answer_draft": None,
             "answer_citations": [], "answer_status": "insufficient",
             "grounding_status": "rejected", "grounding_assessment": None,
@@ -333,6 +343,7 @@ def _grounding_delta(state, assessment, call):
     supported = all(claim.supported for claim in assessment.claims)
     if not supported:
         return {**_rejected_grounding(state, call), "grounding_assessment": assessment}
+    metrics.increment("rag_grounding", workflow="qa", status="accepted")
     text, citations = render_cited_answer(
         _answer_draft(state).claims, state["relevant_text"], asset_id=state["asset_id"],
         index_version=state["index_version"], missing_information=_decision(state).missing_information,
@@ -346,8 +357,8 @@ def _grounding_delta(state, assessment, call):
 def validate_grounding(state: QuestionAnswerState, config: RunnableConfig = None):
     try:
         assessment, call = _call("grounding_check", _grounding_inputs(state), config)
-    except (ChainInputError, StructuredOutputError, ProviderExecutionError):
-        logger.warning("Grounding check could not verify the draft answer", exc_info=True)
+    except (ChainInputError, StructuredOutputError, ProviderExecutionError) as exc:
+        logger.warning("Grounding check could not verify the draft answer (exception_type=%s)", type(exc).__name__)
         return _rejected_grounding(state)
     return _grounding_delta(state, assessment, call)
 
@@ -355,8 +366,8 @@ def validate_grounding(state: QuestionAnswerState, config: RunnableConfig = None
 async def validate_grounding_async(state: QuestionAnswerState, config: RunnableConfig = None):
     try:
         assessment, call = await _acall("grounding_check", _grounding_inputs(state), config)
-    except (ChainInputError, StructuredOutputError, ProviderExecutionError):
-        logger.warning("Grounding check could not verify the draft answer", exc_info=True)
+    except (ChainInputError, StructuredOutputError, ProviderExecutionError) as exc:
+        logger.warning("Grounding check could not verify the draft answer (exception_type=%s)", type(exc).__name__)
         return _rejected_grounding(state)
     return _grounding_delta(state, assessment, call)
 
@@ -396,6 +407,7 @@ def _build_graph(answer_name):
 
 
 stream_graph = _build_graph("generate_answer_streaming")
-checkpointer = MemorySaver()
-stream_qa_graph = stream_graph.compile(checkpointer=checkpointer)
-qa_graph = _build_graph("generate_answer").compile()
+
+
+def compile_qa_graph(checkpointer):
+    return stream_graph.compile(checkpointer=checkpointer)

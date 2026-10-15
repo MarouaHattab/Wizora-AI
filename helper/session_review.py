@@ -1,7 +1,11 @@
 from threading import Lock
+from uuid import uuid4
 
 from fastapi import HTTPException
 from fastapi.responses import StreamingResponse
+
+from helper.failures import StorageUnavailable
+from helper.session_store import LeaseConflict, acquire_lease, release_lease
 
 
 _registry_lock = Lock()
@@ -10,15 +14,22 @@ _consumed_reviews = {}
 
 
 class SessionLease:
-    def __init__(self, lock):
+    def __init__(self, lock, workflow, thread_id, owner):
         self.lock = lock
+        self.workflow = workflow
+        self.thread_id = thread_id
+        self.owner = owner
         self.released = False
 
     def release(self):
         with _registry_lock:
-            if not self.released:
-                self.lock.release()
-                self.released = True
+            if self.released:
+                return
+            self.released = True
+        try:
+            release_lease(self.workflow, self.thread_id, self.owner)
+        finally:
+            self.lock.release()
 
 
 class SessionStreamingResponse(StreamingResponse):
@@ -44,7 +55,19 @@ def acquire_session(workflow, thread_id):
         lock = _session_locks.setdefault(key, Lock())
     if not lock.acquire(blocking=False):
         raise HTTPException(status_code=409, detail="Session is already processing a request")
-    return SessionLease(lock)
+    owner = str(uuid4())
+    try:
+        acquire_lease(workflow, thread_id, owner)
+    except LeaseConflict:
+        lock.release()
+        raise HTTPException(status_code=409, detail="Session is already processing a request") from None
+    except StorageUnavailable:
+        lock.release()
+        raise HTTPException(status_code=503, detail="Workflow storage is unavailable") from None
+    except Exception:
+        lock.release()
+        raise
+    return SessionLease(lock, workflow, thread_id, owner)
 
 
 def session_status(snapshot):

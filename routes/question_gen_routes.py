@@ -1,4 +1,6 @@
 import asyncio
+import sqlite3
+import time
 import uuid
 from fastapi import APIRouter, HTTPException, Body
 from typing import Literal
@@ -7,16 +9,18 @@ from langchain_core.exceptions import OutputParserException
 from pydantic import ValidationError
 
 from controllers.GraphState import QuestionGenState
-from controllers.QuestionGenGraphController import qg_graph
 from chains.contracts import (
     ChainInputError, InsufficientSourceError, ProviderExecutionError,
     StructuredOutputError, TextOutputError,
 )
 from helper import get_settings
+from helper.failures import StorageUnavailable
 from helper.session_review import acquire_session, accept_feedback, review_revision, session_status
 from helper.asset_http import read_asset_text
 from helper.question_review import REVIEW_MESSAGE
 from helper.workflow_history import critic_feedback_value, normalize_review_state
+from helper.workflow_metrics import metrics
+from helper.workflow_runtime import note_snapshot, require_graph
 
 router = APIRouter()
 settings = get_settings()
@@ -55,6 +59,28 @@ def question_response(thread_id, snapshot):
     return response
 
 
+def _question_graph():
+    return require_graph("question_generation")
+
+
+async def _record_failure(thread_id, graph, started, exc, request_id):
+    snapshot = None
+    try:
+        snapshot = await graph.aget_state({"configurable": {"thread_id": thread_id}})
+    except Exception:
+        snapshot = None
+    note_snapshot(
+        "question_generation", thread_id, snapshot,
+        started=started, error=exc, request_id=request_id,
+    )
+
+
+def _storage_error(exc):
+    if isinstance(exc, (StorageUnavailable, sqlite3.OperationalError)):
+        return HTTPException(status_code=503, detail="Workflow storage is unavailable")
+    return None
+
+
 @router.post("/start_session")
 async def start_question_generation_session(
     asset_id: str = Body(..., embed=True),
@@ -71,25 +97,39 @@ async def start_question_generation_session(
         auto_revision_count=0, review_model_calls=0, revision_limit_reached=False,
     )
     config = {"configurable": {"thread_id": thread_id}}
+    request_id = uuid.uuid4().hex[:12]
+    graph = _question_graph()
     lock = acquire_session("question_generation", thread_id)
+    started = time.perf_counter()
     try:
         async with asyncio.timeout(settings.GRAPH_TIMEOUT_SECONDS):
-            await qg_graph.ainvoke(initial_state, config=config)
-            return question_response(thread_id, await qg_graph.aget_state(config))
+            await graph.ainvoke(initial_state, config=config)
+            snapshot = await graph.aget_state(config)
+            note_snapshot("question_generation", thread_id, snapshot, started=started, request_id=request_id)
+            return question_response(thread_id, snapshot)
     except HTTPException:
         raise
     except InsufficientSourceError as exc:
+        await _record_failure(thread_id, graph, started, exc, request_id)
         raise HTTPException(status_code=422, detail={"status": "insufficient_source", "reason": exc.reason}) from None
-    except ChainInputError:
+    except ChainInputError as exc:
+        await _record_failure(thread_id, graph, started, exc, request_id)
         raise HTTPException(status_code=422, detail="Invalid question generation input") from None
-    except (StructuredOutputError, TextOutputError, ValidationError, OutputParserException):
+    except (StructuredOutputError, TextOutputError, ValidationError, OutputParserException) as exc:
+        await _record_failure(thread_id, graph, started, exc, request_id)
         raise HTTPException(status_code=502, detail="The question provider returned an invalid structured result") from None
-    except ProviderExecutionError:
+    except ProviderExecutionError as exc:
+        await _record_failure(thread_id, graph, started, exc, request_id)
         raise HTTPException(status_code=502, detail="The question provider failed") from None
-    except TimeoutError:
+    except TimeoutError as exc:
+        await _record_failure(thread_id, graph, started, exc, request_id)
         raise HTTPException(status_code=504, detail="Question generation timed out") from None
-    except Exception:
-        raise HTTPException(status_code=500, detail="Error invoking question generation graph")
+    except Exception as exc:
+        await _record_failure(thread_id, graph, started, exc, request_id)
+        storage = _storage_error(exc)
+        if storage is not None:
+            raise storage from None
+        raise HTTPException(status_code=500, detail="Error invoking question generation graph") from None
     finally:
         lock.release()
 
@@ -101,28 +141,43 @@ async def provide_feedback_to_question_generation(
     review_id: str | None = Body(None, embed=True),
 ):
     config = {"configurable": {"thread_id": thread_id}}
+    request_id = uuid.uuid4().hex[:12]
+    graph = _question_graph()
     lock = acquire_session("question_generation", thread_id)
+    started = time.perf_counter()
     try:
         async with asyncio.timeout(settings.GRAPH_TIMEOUT_SECONDS):
-            snapshot = await qg_graph.aget_state(config)
+            snapshot = await graph.aget_state(config)
             accept_feedback("question_generation", thread_id, snapshot, feedback, review_id)
-            await qg_graph.ainvoke(Command(resume={
+            metrics.increment("workflow_resume", workflow="question_generation")
+            await graph.ainvoke(Command(resume={
                 "feedback": feedback, "review_id": review_revision(snapshot),
             }), config=config)
-            return question_response(thread_id, await qg_graph.aget_state(config))
+            snapshot = await graph.aget_state(config)
+            note_snapshot("question_generation", thread_id, snapshot, started=started, request_id=request_id)
+            return question_response(thread_id, snapshot)
     except HTTPException:
         raise
     except InsufficientSourceError as exc:
+        await _record_failure(thread_id, graph, started, exc, request_id)
         raise HTTPException(status_code=422, detail={"status": "insufficient_source", "reason": exc.reason}) from None
-    except ChainInputError:
+    except ChainInputError as exc:
+        await _record_failure(thread_id, graph, started, exc, request_id)
         raise HTTPException(status_code=422, detail="Invalid question revision input") from None
-    except (StructuredOutputError, TextOutputError, ValidationError, OutputParserException):
+    except (StructuredOutputError, TextOutputError, ValidationError, OutputParserException) as exc:
+        await _record_failure(thread_id, graph, started, exc, request_id)
         raise HTTPException(status_code=502, detail="The question provider returned an invalid structured result") from None
-    except ProviderExecutionError:
+    except ProviderExecutionError as exc:
+        await _record_failure(thread_id, graph, started, exc, request_id)
         raise HTTPException(status_code=502, detail="The question provider failed") from None
-    except TimeoutError:
+    except TimeoutError as exc:
+        await _record_failure(thread_id, graph, started, exc, request_id)
         raise HTTPException(status_code=504, detail="Question revision timed out") from None
-    except Exception:
-        raise HTTPException(status_code=500, detail="Error resuming question generation graph")
+    except Exception as exc:
+        await _record_failure(thread_id, graph, started, exc, request_id)
+        storage = _storage_error(exc)
+        if storage is not None:
+            raise storage from None
+        raise HTTPException(status_code=500, detail="Error resuming question generation graph") from None
     finally:
         lock.release()
