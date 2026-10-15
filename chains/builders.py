@@ -186,7 +186,10 @@ def _answer_inputs(value):
 
 
 def _model_boundary(llm, schema=None):
-    model = llm.with_structured_output(schema) if schema is not None else llm
+    try:
+        model = llm.with_structured_output(schema) if schema is not None else llm
+    except Exception as exc:
+        raise ProviderExecutionError("The configured model could not prepare the requested task") from exc
 
     def invoke(value, config: RunnableConfig):
         try:

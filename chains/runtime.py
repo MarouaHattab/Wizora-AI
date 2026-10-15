@@ -8,7 +8,7 @@ from threading import RLock
 from langchain_core.runnables import Runnable
 from pydantic import SecretStr
 
-from chains.contracts import ChainInputError
+from chains.contracts import ChainInputError, ProviderExecutionError
 from llm.LLMProviderFactory import LLMProviderFactory
 from .builders import build_task_chain
 
@@ -105,7 +105,10 @@ def get_task_chain(task: str, settings, *, llm=None) -> Runnable:
             return _chains[chain_key]
         model = _models.get(model_key)
         if model is None:
-            model = LLMProviderFactory(settings).create(provider, model_id, temperature, timeout)
+            try:
+                model = LLMProviderFactory(settings).create(provider, model_id, temperature, timeout)
+            except Exception as exc:
+                raise ProviderExecutionError("The configured model could not be initialized") from exc
             _remember(_models, model_key, model, _MODEL_LIMIT)
         else:
             _models.move_to_end(model_key)
