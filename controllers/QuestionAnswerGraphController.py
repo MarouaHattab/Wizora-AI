@@ -7,20 +7,25 @@ from helper.asset_index import ensure_asset_index
 from llm import LLMProviderFactory
 
 from chains import GradeQuestion, GradeQuestionPrompt
+from chains.QuestionAnswerChain import QuestionAnswerPrompt, prepare_question_answer_inputs
+from chains.contracts import text_output
 from .GraphState import QuestionAnswerState
 
 from langchain_core.messages import AIMessage, BaseMessage
 from langgraph.graph import StateGraph, START, END
 from langgraph.checkpoint.memory import MemorySaver
-from langchain_core.prompts import ChatPromptTemplate
 
 config = get_settings()
 
+
+def _question_text(state: QuestionAnswerState) -> str:
+    message = state["messages"][-1]
+    if isinstance(message, dict):
+        message = message["content"]
+    return text_output(message)
+
 def question_classifier(state: QuestionAnswerState) -> QuestionAnswerState: 
-    if hasattr(state["messages"][-1], 'content'):
-        question = state["messages"][-1].content
-    else:    
-        question = state["messages"][-1]["content"]
+    question = _question_text(state)
 
     if "conversation_history" not in state:
         state["conversation_history"] = []
@@ -38,14 +43,17 @@ def question_classifier(state: QuestionAnswerState) -> QuestionAnswerState:
     structured_llm = llm.with_structured_output(GradeQuestion)
     grader_llm = GradeQuestionPrompt | structured_llm
     result = grader_llm.invoke({"question": question, "docs": docs})
+    if isinstance(result, GradeQuestion):
+        result = result.model_dump()
+    result = GradeQuestion.model_validate(result)
     
     state["on_topic"] = result.score
 
     return state
 
 def on_topic_router(state: QuestionAnswerState): 
-    on_topic = state["on_topic"]
-    if on_topic.lower() == "yes":
+    on_topic = GradeQuestion.model_validate({"score": state["on_topic"]}).score
+    if on_topic == "Yes":
         return "on_topic"
     return "off_topic"
 
@@ -53,43 +61,22 @@ def retrieve(state: QuestionAnswerState):
     return state
 
 def generate_answer(state: QuestionAnswerState): 
-    
-    if hasattr(state["messages"][-1], 'content'):
-        question = state["messages"][-1].content
-    else:    
-        question = state["messages"][-1]["content"]
-    documents = state["relevant_text"] 
-
-    if "conversation_history" not in state:
-        state["conversation_history"] = []
-    
-    # Use conversation history for better context
+    question = _question_text(state)
     chat_history = state.get("conversation_history", [])
-
-    template = """ 
-Answer the question based only on the following context: {context},
-chat history: {chat_history},
-Question: {question}
-"""
-
-    prompt = ChatPromptTemplate.from_template(template)
+    inputs = prepare_question_answer_inputs(state["relevant_text"], question, chat_history)
     llm = LLMProviderFactory(config).create(
         config.QUESTION_ANSWERER_PROVIDER, 
         config.QUESTION_ANSWERER_MODEL_ID, 
         config.QUESTION_ANSWERER_TEMPERATURE
     )
 
-    rag_chain = prompt | llm
-
-    generation =  rag_chain.invoke({"context": documents, "chat_history": chat_history, "question": question})
-    state["messages"].append(generation)
-    
-    state["conversation_history"] = state.get("conversation_history", []) + [
-        state["messages"][-2],  
-        generation              
-    ]
-    
-    return state
+    rag_chain = QuestionAnswerPrompt | llm
+    generation = AIMessage(content=text_output(rag_chain.invoke(inputs)))
+    return {
+        **state,
+        "messages": state["messages"] + [generation],
+        "conversation_history": chat_history + [state["messages"][-1], generation],
+    }
 
 def message_text(message):
     if isinstance(message, BaseMessage):
@@ -98,37 +85,21 @@ def message_text(message):
 
 
 async def generate_answer_streaming(state: QuestionAnswerState): 
-    question = state["messages"][-1].content
-    documents = state["relevant_text"] 
-    
-    if "conversation_history" not in state:
-        state["conversation_history"] = []
-    
-    # Use conversation history for better context
+    question = _question_text(state)
     chat_history = state.get("conversation_history", [])
-
-    template = """ 
-Answer the question based only on the following context: {context},
-chat history: {chat_history},
-Question: {question}
-"""
-
-    prompt = ChatPromptTemplate.from_template(template)
+    inputs = prepare_question_answer_inputs(state["relevant_text"], question, chat_history)
     llm = LLMProviderFactory(config).create(
         config.QUESTION_ANSWERER_PROVIDER, 
         config.QUESTION_ANSWERER_MODEL_ID, 
         config.QUESTION_ANSWERER_TEMPERATURE
     )
 
-    rag_chain = prompt | llm
+    rag_chain = QuestionAnswerPrompt | llm
     
     full_response = ""
-    async for chunk in rag_chain.astream({"context": documents, "chat_history": chat_history, "question": question}):
+    async for chunk in rag_chain.astream(inputs):
         full_response += message_text(chunk)
-    if not full_response.strip():
-        raise RuntimeError("The answer provider returned no text")
-
-    generation = AIMessage(content=full_response)
+    generation = AIMessage(content=text_output(full_response))
     return {
         **state,
         "messages": state["messages"] + [generation],
