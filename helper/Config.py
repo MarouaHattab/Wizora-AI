@@ -73,6 +73,8 @@ class Settings(BaseSettings):
     REVISION_CONTEXT_RECORDS: int = Field(default=3, gt=0)
     REVISION_CONTEXT_CHARACTERS: int = Field(default=6000, ge=512)
     REVISION_REQUIREMENTS_CHARACTERS: int = Field(default=8000, ge=512)
+    AUTO_REVISION_LIMIT: int = Field(default=1, ge=0, le=3)
+    REFINE_MODEL_CALL_LIMIT: int = Field(default=3, ge=1, le=6)
 
     RAG_RETRIEVAL_STRATEGY: Literal["mmr", "similarity"] = "mmr"
     RAG_TOP_K: int = Field(default=5, ge=1, le=20)

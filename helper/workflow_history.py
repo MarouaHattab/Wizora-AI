@@ -186,6 +186,9 @@ def _compact_record(record, budget=3072):
         text = critic.get("feedback", "")
         record["critic_feedback"] = {
             "acceptable": critic.get("acceptable") is True,
+            "verdict": critic.get("verdict") if critic.get("verdict") in {"acceptable", "needs_revision"} else (
+                "acceptable" if critic.get("acceptable") is True else "needs_revision"
+            ),
             "issue_count": len(critic.get("issues", [])) if isinstance(critic.get("issues"), list) else 0,
             "feedback_hash": _digest(critic),
             "feedback_preview": text[:256] if isinstance(text, str) else "",
@@ -293,7 +296,7 @@ def revision_delta(state, config, *, draft, status, reason=None, critic=None):
         history.pop(0)
     requirements = _requirements(state)
     feedback = human_feedback_value(state).strip()
-    if feedback and feedback.casefold() not in {"auto", "save"}:
+    if feedback and feedback.casefold() not in {"auto", "save", "refine", "accept"}:
         requirements = [item for item in requirements if item["feedback"].casefold() != feedback.casefold()]
         requirements.append({"review_id": review_id, "feedback": feedback})
     requirements = _bounded_requirements(requirements, config.REVISION_REQUIREMENTS_CHARACTERS)

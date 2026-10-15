@@ -75,20 +75,38 @@ class RevisionResult(StructuredResult):
 
 
 class ReviewIssue(StructuredResult):
+    code: NonemptyText | None = Field(default=None, description="Stable issue code such as unsupported_answer or ambiguous_stem.")
     kind: Literal["structural", "factual", "ambiguity", "distractor"]
     field: Literal["question_type", "question", "options", "answer", "explanation"]
+    severity: Literal["low", "medium", "high"] = "medium"
     correction_hint: NonemptyText
+
+    @model_validator(mode="after")
+    def default_code(self):
+        if self.code is None:
+            return self.model_copy(update={"code": self.kind})
+        return self
 
 
 class Feedback(StructuredResult):
     acceptable: bool
+    verdict: Literal["acceptable", "needs_revision"] | None = None
     issues: list[ReviewIssue]
     feedback: NonemptyText
 
     @model_validator(mode="after")
     def validate_review(self):
-        if self.acceptable != (not self.issues):
-            raise ValueError("Acceptable reviews require no issues; rejected reviews require actionable issues")
+        blocking = [issue for issue in self.issues if issue.severity != "low"]
+        if self.acceptable:
+            if blocking:
+                raise ValueError("Acceptable reviews cannot include unresolved blocking issues")
+        elif not self.issues:
+            raise ValueError("A revision verdict requires actionable findings")
+        verdict = "acceptable" if self.acceptable else "needs_revision"
+        if self.verdict is None:
+            return self.model_copy(update={"verdict": verdict})
+        if self.verdict != verdict:
+            raise ValueError("verdict must match acceptable")
         return self
 
     def format(self) -> str:

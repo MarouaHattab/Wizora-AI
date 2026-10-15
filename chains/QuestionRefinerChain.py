@@ -13,15 +13,20 @@ review_examples = [
         "explanation": "The source states that binary search requires sorted input.",
         "result": {
             "acceptable": False,
+            "verdict": "needs_revision",
             "issues": [
                 {
+                    "code": "invalid_tf_options",
                     "kind": "structural",
                     "field": "options",
+                    "severity": "high",
                     "correction_hint": "Use null for T/F options instead of an empty array.",
                 },
                 {
+                    "code": "unsupported_answer",
                     "kind": "factual",
                     "field": "answer",
+                    "severity": "high",
                     "correction_hint": "Use True: the source explicitly requires sorted input.",
                 },
             ],
@@ -68,11 +73,13 @@ Check that the answer and explanation follow from SOURCE, preserve its qualifica
 and agree with each other. A False answer needs an explicit source contradiction;
 omission is not disproof. Flag unsupported superlatives or comparisons, ambiguous wording,
 multiple correct choices, duplicate or implausible distractors, and unsupported explanations.
-Return only JSON with acceptable, issues, feedback. Each issue has kind
-(structural, factual, ambiguity, or distractor), field (question_type, question, options,
-answer, or explanation), and a specific nonblank correction_hint. Keep feedback a
-nonblank concise summary. Use acceptable true with issues [] only when all checks pass;
-otherwise use acceptable false and at least one actionable issue. Shape alone does not
+Return only JSON with acceptable, verdict, issues, and feedback. verdict is acceptable
+or needs_revision and must match acceptable. Each issue has code, kind (structural,
+factual, ambiguity, or distractor), field (question_type, question, options, answer, or
+explanation), severity (low, medium, or high), and a specific nonblank correction_hint.
+Keep feedback a nonblank concise summary. Use acceptable true, verdict acceptable, and
+issues [] only when all checks pass. Use acceptable false and needs_revision with at
+least one medium or high issue when correction is required. Shape alone does not
 establish factual accuracy. Do not praise, add outside knowledge, or provide a full rewrite.""",
         ),
         few_shot_prompt,
