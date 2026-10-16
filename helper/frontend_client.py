@@ -6,11 +6,40 @@ from collections.abc import AsyncIterator
 from contextlib import aclosing
 from pathlib import Path, PurePosixPath
 from typing import Any, Literal
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit
+from functools import lru_cache
 
 import httpx
+from pydantic import Field, field_validator
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
-from frontend.settings import FrontendSettings, get_frontend_settings
+
+class FrontendSettings(BaseSettings):
+    model_config = SettingsConfigDict(env_file=Path(__file__).resolve().parents[1] / ".env", extra="ignore")
+
+    FRONTEND_BACKEND_URL: str = "http://127.0.0.1:8000"
+    FRONTEND_HOST: str = "127.0.0.1"
+    FRONTEND_PORT: int = Field(default=7860, ge=1, le=65535)
+    FRONTEND_TIMEOUT_SECONDS: float = Field(default=600, gt=0, allow_inf_nan=False)
+    MAX_UPLOAD_BYTES: int = Field(default=268435456, gt=0)
+
+    @field_validator("FRONTEND_BACKEND_URL")
+    @classmethod
+    def backend_url(cls, value: str) -> str:
+        parsed = urlsplit(value)
+        try:
+            parsed.port
+        except ValueError:
+            raise ValueError("Backend URL has an invalid port") from None
+        if (parsed.scheme not in {"http", "https"} or not parsed.hostname
+                or parsed.username or parsed.password or parsed.query or parsed.fragment):
+            raise ValueError("Backend URL must be an HTTP(S) URL without credentials, query, or fragment")
+        return value.rstrip("/")
+
+
+@lru_cache(maxsize=1)
+def get_frontend_settings() -> FrontendSettings:
+    return FrontendSettings()
 
 Workflow = Literal["question_generation", "summarization", "qa"]
 _TERMINAL_EVENTS = {"awaiting_feedback", "completed", "failed"}
@@ -142,23 +171,14 @@ class BackendClient:
             with upload_path.open("rb") as file:
                 content_type = mimetypes.guess_type(upload_path.name)[0] or "application/octet-stream"
                 return await self._request(
-                    "POST", "/api/v1/preprocessing/uploads",
+                    "POST", "/api/v1/preprocessing/upload_file/",
                     files={"file": (upload_path.name, file, content_type)},
                 )
         except OSError:
             raise BackendError("The selected upload file is unavailable", 422) from None
 
-    async def get_upload(self, upload_id: str) -> dict[str, Any]:
-        return await self._request("GET", f"/api/v1/preprocessing/uploads/{_segment(upload_id)}")
-
-    async def get_assets(self) -> dict[str, Any]:
-        return await self._request("GET", "/api/v1/preprocessing/assets")
-
     async def get_asset(self, asset_id: str) -> dict[str, Any]:
         return await self._request("GET", f"/api/v1/preprocessing/assets/{_segment(asset_id)}")
-
-    async def configuration(self) -> dict[str, Any]:
-        return await self._request("GET", "/api/v1/preprocessing/assets/config")
 
     async def extracted_text(self, asset_id: str) -> dict[str, Any]:
         return await self._request("GET", f"/api/v1/preprocessing/get_extracted_text/{_segment(asset_id)}")
@@ -168,7 +188,12 @@ class BackendClient:
             raise BackendError("Unsupported workflow", 422)
         return await self._request("GET", f"/api/v1/sessions/{workflow}/{_segment(thread_id)}")
 
-    async def start_question(self, asset_id: str, question_type: str) -> dict[str, Any]:
+    async def start_question(
+        self, asset_id: str, question_type: str = "MCQ",
+    ) -> dict[str, Any]:
+        _segment(asset_id)
+        if question_type not in {"MCQ", "T/F"}:
+            raise BackendError("Choose MCQ or T/F", 422)
         return await self._request("POST", "/api/v1/graph/qg/start_session", json={
             "asset_id": asset_id, "question_type": question_type,
         })
@@ -217,6 +242,8 @@ class BackendClient:
                             thread_id, run_id = event["thread_id"], event["run_id"]
                             if payload.get("thread_id") and thread_id != payload["thread_id"]:
                                 raise BackendError("The backend stream returned a different session", 502)
+                            if payload.get("asset_id") and event["data"].get("asset_id", payload["asset_id"]) != payload["asset_id"]:
+                                raise BackendError("The backend stream returned a different file", 502)
                         if event["thread_id"] != thread_id or event["run_id"] != run_id:
                             raise BackendError("The backend stream changed session identifiers", 502)
                         sequence = event["sequence"]
@@ -241,6 +268,7 @@ class BackendClient:
         else:
             if not asset_id:
                 raise BackendError("Select an educational asset", 422)
+            _segment(asset_id)
             path = "/api/v1/graph/summarizer/start_session_streaming"
             payload = {"asset_id": asset_id}
         async with aclosing(self._events(path, payload)) as events:
@@ -258,6 +286,7 @@ class BackendClient:
         else:
             if not asset_id:
                 raise BackendError("Select an educational asset", 422)
+            _segment(asset_id)
             path = "/api/v1/graph/qa/start_session_stream"
             payload = {"asset_id": asset_id, "initial_question": question}
         async with aclosing(self._events(path, payload)) as events:
