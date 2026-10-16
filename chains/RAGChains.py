@@ -162,10 +162,19 @@ def evidence_records(documents, asset_id, index_version):
         record = {"chunk_id": chunk_id, "asset_id": asset_id, "index_version": index_version,
                   "page_content": _text(document.page_content, "page_content")}
         for key in ("source_type", "page", "page_count", "start", "end", "record_id", "record_index",
-                    "chunk_index", "source_start", "source_end", "asset_version"):
+                    "chunk_index", "source_start", "source_end", "asset_version", "segment_id", "language",
+                    "modality", "content_type", "element_id", "paragraph", "section", "section_path",
+                    "heading_level", "table_index", "table_count", "image_count", "image_references",
+                    "document_title", "document_author", "document_subject", "document_created", "document_modified",
+                    "document_keywords", "document_category", "document_language", "scanned_page_count", "empty_page_count",
+                    "document_creator", "document_producer", "document_creationDate", "document_modDate",
+                    "timestamp_precision"):
             value = metadata.get(key)
             if isinstance(value, (str, int, float)) and not isinstance(value, bool):
                 record[key] = value
+        for key in ("scanned", "ocr"):
+            if type(metadata.get(key)) is bool:
+                record[key] = metadata[key]
         source = _source_name(metadata.get("source"))
         if source:
             record["source"] = source

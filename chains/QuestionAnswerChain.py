@@ -41,11 +41,19 @@ def serialize_evidence(documents: Sequence[Document]) -> str:
         for key in (
             "asset_id", "index_version", "chunk_index", "asset_version", "source_type",
             "source", "page", "page_count", "start", "end", "record_id", "record_index",
-            "source_start", "source_end",
+            "source_start", "source_end", "segment_id", "language", "modality", "content_type",
+            "element_id", "paragraph", "section", "section_path", "heading_level", "table_index",
+            "table_count", "image_count", "image_references", "document_title", "document_author",
+            "document_subject", "document_created", "document_modified", "timestamp_precision",
+            "document_keywords", "document_category", "document_language", "scanned_page_count", "empty_page_count",
+            "document_creator", "document_producer", "document_creationDate", "document_modDate",
         ):
             value = metadata.get(key)
             if isinstance(value, (str, int, float)) and not isinstance(value, bool):
                 excerpt[key] = value
+        for key in ("scanned", "ocr"):
+            if type(metadata.get(key)) is bool:
+                excerpt[key] = metadata[key]
 
         chunk_id = document.id or metadata.get("chunk_id")
         if isinstance(chunk_id, str) and chunk_id:

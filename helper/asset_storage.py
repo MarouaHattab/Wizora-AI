@@ -1,14 +1,132 @@
 import hashlib
 import json
 import math
+from pathlib import PurePosixPath, PureWindowsPath
 
 from langchain_core.documents import Document
 
+from . import asset_paths
 from .asset_paths import asset_file, validate_asset_id
 from .ingestion_errors import AssetNotFoundError, EmptyContentError, InvalidDocumentError, StorageError
 
 
-_SOURCE_TYPES = {"pdf", "audio", "video", "text"}
+_SOURCE_TYPES = {"pdf", "docx", "audio", "video", "text"}
+SOURCE_METADATA_KEYS = (
+    "page", "page_count", "start", "end", "segment_id", "language", "modality", "content_type",
+    "element_id", "paragraph", "section", "section_path", "heading_level", "table_index",
+    "table_count", "image_count", "image_references", "document_title", "document_author",
+    "document_subject", "document_created", "document_modified", "document_keywords", "document_category",
+    "document_language", "document_creator", "document_producer", "document_creationDate", "document_modDate",
+    "scanned", "ocr", "scanned_page_count", "empty_page_count", "timestamp_precision",
+)
+_BOOLEAN_METADATA = {"scanned", "ocr"}
+_INTEGER_METADATA = {
+    "page", "page_count", "paragraph", "heading_level", "table_index", "table_count", "image_count",
+    "scanned_page_count", "empty_page_count",
+}
+_TIMESTAMP_METADATA = {"start", "end"}
+
+
+def _image_reference(value):
+    if not isinstance(value, str) or not value or len(value) > 512 or "\\" in value:
+        raise InvalidDocumentError("Invalid source image reference")
+    path = PurePosixPath(value)
+    if (
+        path.is_absolute() or PureWindowsPath(value).is_absolute() or ":" in value
+        or len(path.parts) < 2 or path.parts[0] != "images"
+        or any(part in {"", ".", ".."} for part in value.split("/"))
+        or any(ord(char) < 32 for char in value)
+    ):
+        raise InvalidDocumentError("Source image references must stay inside the asset")
+
+
+def validate_source_metadata(metadata, source_type=None):
+    """Validate source locators without requiring new fields on existing records."""
+    if not isinstance(metadata, dict):
+        raise InvalidDocumentError("Invalid source metadata")
+    source_type = source_type or metadata.get("source_type")
+    if source_type is not None and (not isinstance(source_type, str) or source_type not in _SOURCE_TYPES):
+        raise InvalidDocumentError("Invalid source type")
+    for key in SOURCE_METADATA_KEYS:
+        value = metadata.get(key)
+        if value is None:
+            continue
+        if key in _BOOLEAN_METADATA:
+            if type(value) is not bool:
+                raise InvalidDocumentError("Invalid source processing flag")
+        elif key in _INTEGER_METADATA:
+            minimum = 0 if key in {"table_count", "image_count", "scanned_page_count", "empty_page_count"} else 1
+            if type(value) is not int or value < minimum:
+                raise InvalidDocumentError("Invalid source element number")
+            if key == "heading_level" and value > 9:
+                raise InvalidDocumentError("Invalid heading hierarchy")
+        elif key in _TIMESTAMP_METADATA:
+            if (
+                type(value) not in (int, float)
+                or isinstance(value, float) and not math.isfinite(value) or value < 0
+            ):
+                raise InvalidDocumentError("Invalid source timestamp")
+        elif key == "segment_id":
+            if not ((type(value) is int and value >= 0) or (isinstance(value, str) and value.strip())):
+                raise InvalidDocumentError("Invalid source segment identifier")
+        elif not isinstance(value, str) or not value.strip() or len(value) > 64000:
+            raise InvalidDocumentError("Invalid source metadata text")
+        if key in {"element_id", "segment_id"} and isinstance(value, str):
+            if len(value) > 256 or any(ord(char) < 32 for char in value):
+                raise InvalidDocumentError("Invalid source element identifier")
+    modality = metadata.get("modality")
+    if modality is not None and (not isinstance(modality, str) or modality not in _SOURCE_TYPES
+                                 or (source_type is not None and modality != source_type)):
+        raise InvalidDocumentError("Source modality does not match its asset")
+    if source_type == "pdf" and (type(metadata.get("page")) is not int or metadata["page"] < 1):
+        raise InvalidDocumentError("PDF records require an original page number")
+    if source_type == "docx" and not isinstance(metadata.get("element_id"), str):
+        raise InvalidDocumentError("DOCX records require a stable element identifier")
+    if source_type == "docx" and metadata.get("page") is not None:
+        raise InvalidDocumentError("DOCX records must use stable element references instead of pages")
+    if "page_count" in metadata and metadata["page_count"] < metadata.get("page", 1):
+        raise InvalidDocumentError("Invalid PDF page count")
+    start, end = metadata.get("start"), metadata.get("end")
+    if (start is None) != (end is None) or (start is not None and end < start):
+        raise InvalidDocumentError("Invalid transcription timestamps")
+    if source_type in {"audio", "video"} and metadata.get("content_type") not in {None, "transcript"}:
+        raise InvalidDocumentError("Audio and video evidence must contain transcribed speech")
+    precision = metadata.get("timestamp_precision")
+    if precision is not None and (
+        precision not in {"segment", "audio_window"} or start is None or source_type not in {"audio", "video"}
+    ):
+        raise InvalidDocumentError("Invalid transcription timestamp precision")
+    for key in ("section_path", "image_references"):
+        if key not in metadata:
+            continue
+        try:
+            values = json.loads(metadata[key])
+        except (TypeError, ValueError) as exc:
+            raise InvalidDocumentError("Source reference collections must be JSON strings") from exc
+        if not isinstance(values, list) or len(values) > 10000:
+            raise InvalidDocumentError("Invalid source reference collection")
+        for value in values:
+            if key == "image_references":
+                if isinstance(value, str):
+                    _image_reference(value)
+                    continue
+                if not isinstance(value, dict) or set(value) - {
+                    "element_id", "image_id", "content_type", "byte_count", "status", "reference",
+                }:
+                    raise InvalidDocumentError("Invalid embedded image metadata")
+                if (
+                    any(not isinstance(value.get(field), str) or not value[field].strip()
+                        or len(value[field]) > 256 for field in ("element_id", "image_id", "content_type"))
+                    or not value["content_type"].startswith("image/")
+                    or type(value.get("byte_count")) is not int or value["byte_count"] < 0
+                    or value.get("status") not in {"available", "unsupported_format", "too_large", "limit_reached"}
+                    or value["status"] == "available" and "reference" not in value
+                ):
+                    raise InvalidDocumentError("Invalid embedded image metadata")
+                if "reference" in value:
+                    _image_reference(value["reference"])
+            elif not isinstance(value, str) or not value.strip():
+                raise InvalidDocumentError("Invalid section hierarchy")
 
 
 def flatten_documents(documents):
@@ -33,6 +151,8 @@ def source_records(documents, asset_id, source_type, source_name, asset_version)
     for document in documents:
         if not isinstance(document, Document) or not isinstance(document.page_content, str):
             raise InvalidDocumentError("Invalid source document")
+        if document.metadata.get("asset_id", asset_id) != asset_id:
+            raise InvalidDocumentError("Source record ownership does not match its asset")
         text = document.page_content.strip()
         if not text:
             continue
@@ -40,26 +160,15 @@ def source_records(documents, asset_id, source_type, source_name, asset_version)
             "asset_id": asset_id, "source_type": source_type, "source": source_name,
             "asset_version": asset_version, "record_index": len(records),
         }
-        for key in ("page", "page_count", "start", "end", "segment_id", "language"):
+        for key in SOURCE_METADATA_KEYS:
             value = document.metadata.get(key)
             if value is not None:
-                if not isinstance(value, (str, int, float)) or isinstance(value, bool):
+                if not isinstance(value, (str, int, float, bool)):
                     raise InvalidDocumentError("Invalid source metadata")
                 if isinstance(value, float) and not math.isfinite(value):
                     raise InvalidDocumentError("Invalid source metadata")
                 metadata[key] = value
-        if source_type == "pdf" and (
-            type(metadata.get("page")) is not int or metadata["page"] < 1
-        ):
-            raise InvalidDocumentError("PDF records require an original page number")
-        if "page_count" in metadata and (
-            type(metadata["page_count"]) is not int or metadata["page_count"] < metadata.get("page", 1)
-        ):
-            raise InvalidDocumentError("Invalid PDF page count")
-        if "start" in metadata or "end" in metadata:
-            start, end = metadata.get("start"), metadata.get("end")
-            if not isinstance(start, (int, float)) or not isinstance(end, (int, float)) or not 0 <= start <= end:
-                raise InvalidDocumentError("Invalid transcription timestamps")
+        validate_source_metadata(metadata, source_type)
         metadata["record_id"] = _digest({"metadata": metadata, "text": text})
         records.append({"page_content": text, "metadata": metadata})
     if not records:
@@ -80,7 +189,31 @@ def write_source_records(documents, destination, asset_id, source_type, source_n
     return [Document(**record) for record in records]
 
 
+def _require_ready(asset_id):
+    validate_asset_id(asset_id)
+    root = asset_paths.ASSETS_ROOT.resolve()
+    directory = (root / ".jobs").resolve()
+    path = (directory / f"{asset_id}.json").resolve()
+    if not directory.is_relative_to(root) or not path.is_relative_to(directory):
+        raise StorageError("Invalid processing status directory")
+    try:
+        payload = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return
+    except UnicodeError as exc:
+        raise AssetNotFoundError("The asset is not ready") from exc
+    except OSError as exc:
+        raise StorageError("Unable to read asset processing status") from exc
+    try:
+        status = json.loads(payload)
+    except ValueError as exc:
+        raise AssetNotFoundError("The asset is not ready") from exc
+    if not isinstance(status, dict) or status.get("id") != asset_id or status.get("status") != "ready":
+        raise AssetNotFoundError("The asset is not ready")
+
+
 def _read_text(asset_id):
+    _require_ready(asset_id)
     path = asset_file(asset_id, "extracted_text.txt")
     try:
         text = path.read_text(encoding="utf-8")

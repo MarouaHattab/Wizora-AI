@@ -12,7 +12,8 @@ from langchain_core.documents import Document
 from chains.contracts import ChainInputError, StructuredOutputError
 from .asset_index import RetrievalHit
 from .asset_paths import validate_asset_id
-from .ingestion_errors import InvalidAssetError
+from .asset_storage import validate_source_metadata
+from .ingestion_errors import InvalidAssetError, InvalidDocumentError
 
 
 def packed_evidence_text(documents, asset_id: str, index_version: str) -> str:
@@ -67,6 +68,10 @@ def validate_evidence(documents, *, asset_id: str, index_version: str) -> None:
         content_hash = metadata.get("content_hash")
         if content_hash is not None and content_hash != hashlib.sha256(document.page_content.encode("utf-8")).hexdigest():
             raise ChainInputError("Evidence content does not match its indexed hash")
+        try:
+            validate_source_metadata(metadata)
+        except InvalidDocumentError as exc:
+            raise ChainInputError("Evidence source metadata is invalid") from exc
         page = metadata.get("page")
         if page is not None and (type(page) is not int or page < 1):
             raise ChainInputError("Evidence page numbers must be positive integers")
@@ -182,7 +187,10 @@ def _citation(document, number, asset_id, index_version):
         "number": number, "chunk_id": metadata["chunk_id"],
         "asset_id": asset_id, "index_version": index_version, "source": name,
     }
-    citation.update({key: metadata[key] for key in ("page", "start", "end") if metadata.get(key) is not None})
+    citation.update({key: metadata[key] for key in (
+        "source_type", "modality", "content_type", "page", "start", "end", "section", "paragraph",
+        "element_id", "heading_level", "table_index", "segment_id", "record_id", "timestamp_precision",
+    ) if metadata.get(key) is not None})
     return citation
 
 
@@ -200,11 +208,29 @@ def _source_label(citation):
     location = []
     if "page" in citation:
         location.append(f"Page {citation['page']}")
+    if citation.get("source_type") == "docx":
+        section = citation.get("section")
+        if section:
+            section = " ".join("".join(
+                character for character in section if not unicodedata.category(character).startswith("C")
+            ).split())[:256]
+            section = re.sub(r"([\\`*_{}\[\]()#+<>|])", r"\\\1", section)
+            if section:
+                location.append("Section: " + section)
+        if "paragraph" in citation:
+            location.append(f"Paragraph {citation['paragraph']}")
+        if "table_index" in citation:
+            location.append(f"Table {citation['table_index']}")
+        if not any(key in citation for key in ("paragraph", "table_index")):
+            element = re.sub(r"([\\`*_{}\[\]()#+<>|])", r"\\\1", citation["element_id"])
+            location.append("Element: " + element)
+    if citation.get("source_type") == "video":
+        location.append("Transcript")
     if "start" in citation:
         time = _timestamp(citation["start"])
         if "end" in citation:
             time += "–" + _timestamp(citation["end"])
-        location.append(time)
+        location.append(("Audio window " if citation.get("timestamp_precision") == "audio_window" else "") + time)
     elif "end" in citation:
         location.append("Until " + _timestamp(citation["end"]))
     return name + (" — " + ", ".join(location) if location else "")
