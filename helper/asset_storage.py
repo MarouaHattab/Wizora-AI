@@ -197,7 +197,10 @@ def _require_ready(asset_id):
     if not directory.is_relative_to(root) or not path.is_relative_to(directory):
         raise StorageError("Invalid processing status directory")
     try:
-        payload = path.read_text(encoding="utf-8")
+        # Windows replacement and open read handles must share the catalog lock.
+        from .asset_catalog import _lock as status_lock
+        with status_lock:
+            payload = path.read_text(encoding="utf-8")
     except FileNotFoundError:
         return
     except UnicodeError as exc:

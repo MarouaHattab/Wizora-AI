@@ -14,6 +14,7 @@ from routes import file_processing_routes
 from routes import question_gen_routes
 from routes import summarizer_routes
 from routes import qa_routes
+from routes import session_routes
 
 
 @asynccontextmanager
@@ -21,6 +22,9 @@ async def lifespan(app: FastAPI):
     from helper.workflow_runtime import workflow_runtime
     await workflow_runtime.start()
     try:
+        import anyio
+        from helper.asset_catalog import recover_interrupted_uploads
+        await anyio.to_thread.run_sync(recover_interrupted_uploads)
         yield
     finally:
         await workflow_runtime.stop()
@@ -42,6 +46,7 @@ app.add_middleware(
 )
 
 api_v1_router = APIRouter(prefix="/api/v1")
+api_v1_router.include_router(session_routes.router, prefix="/sessions", tags=["Sessions"])
 
 app.include_router(
     file_processing_routes.router,

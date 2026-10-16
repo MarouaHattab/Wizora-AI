@@ -391,6 +391,8 @@ def _is_complete(index):
 
 
 def _remember(index):
+    from .asset_catalog import mark_index_ready
+    mark_index_ready(index.asset_id, index.index_version, index.chunk_count)
     with _cache_lock:
         _indexes[index.index_version] = index
         _indexes.move_to_end(index.index_version)
