@@ -80,6 +80,21 @@ class Settings(BaseSettings):
     LOG_LEVEL: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "INFO"
     SESSION_RETENTION_DAYS: int = Field(default=0, ge=0, le=3650)
     SESSION_LEASE_SECONDS: float = Field(default=210, gt=0, allow_inf_nan=False)
+    MAX_UPLOAD_BYTES: int = Field(default=268435456, ge=1024, le=2147483648)
+    INDEX_ON_UPLOAD: bool = False
+    MEDIA_TIMEOUT_SECONDS: float = Field(default=180, gt=0, allow_inf_nan=False)
+    VIDEO_MAX_DURATION_SECONDS: float = Field(default=7200, gt=0, allow_inf_nan=False)
+    AUDIO_CHUNK_SECONDS: float = Field(default=300, ge=10, le=600)
+    FFMPEG_BINARY: str | None = None
+    FFPROBE_BINARY: str | None = None
+    PDF_OCR_ENABLED: bool = False
+    PDF_OCR_LANGUAGE: str = "eng"
+    PDF_MAX_OCR_PAGES: int = Field(default=20, ge=1, le=100)
+    FRONTEND_BACKEND_URL: str = "http://127.0.0.1:8000"
+    FRONTEND_HOST: str = "127.0.0.1"
+    FRONTEND_PORT: int = Field(default=7860, ge=1, le=65535)
+    FRONTEND_TIMEOUT_SECONDS: float = Field(default=600, gt=0, allow_inf_nan=False)
+    FRONTEND_BROWSER_SECRET: SecretStr | None = None
 
     RAG_RETRIEVAL_STRATEGY: Literal["mmr", "similarity"] = "mmr"
     RAG_TOP_K: int = Field(default=5, ge=1, le=20)
@@ -115,11 +130,16 @@ class Settings(BaseSettings):
         return value.strip().upper() if isinstance(value, str) else value
 
     @field_validator(
-        "GROQ_API_KEY", "GOOGLE_API_KEY", "HUGGING_FACE_HUB_TOKEN", "LANGSMITH_API_KEY",
+        "GROQ_API_KEY", "GOOGLE_API_KEY", "HUGGING_FACE_HUB_TOKEN", "LANGSMITH_API_KEY", "FRONTEND_BROWSER_SECRET",
         mode="before",
     )
     @classmethod
     def empty_secret(cls, value):
+        return None if isinstance(value, str) and not value.strip() else value
+
+    @field_validator("FFMPEG_BINARY", "FFPROBE_BINARY", mode="before")
+    @classmethod
+    def empty_optional_setting(cls, value):
         return None if isinstance(value, str) and not value.strip() else value
 
     @field_validator("LOG_LEVEL", mode="before")

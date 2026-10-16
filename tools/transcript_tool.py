@@ -6,6 +6,7 @@ from threading import BoundedSemaphore, Lock
 from typing import Any
 
 import whisper
+import numpy as np
 from langchain_core.documents import Document
 
 from helper.ingestion_errors import (
@@ -35,16 +36,24 @@ def _get_model() -> Any:
         return _model
 
 
-def _transcribe(media_path: str) -> Mapping[str, Any]:
+def _transcribe(media_path: str, *, audio_samples: np.ndarray | None = None) -> Mapping[str, Any]:
     path = Path(media_path)
     if not path.is_file():
         raise AssetNotFoundError("The media file was not found.")
     if not path.stat().st_size:
         raise EmptyContentError("The media file is empty.")
+    if audio_samples is not None and (
+        not isinstance(audio_samples, np.ndarray)
+        or audio_samples.dtype != np.float32
+        or audio_samples.ndim != 1
+        or not 0 < audio_samples.size <= 16000 * 600
+        or not np.isfinite(audio_samples).all()
+    ):
+        raise TranscriptionError("The normalized transcription audio is invalid.")
     model = _get_model()
     try:
         with _inference_slots:
-            result = model.transcribe(str(media_path))
+            result = model.transcribe(audio_samples if audio_samples is not None else str(media_path))
     except Exception as exc:
         raise TranscriptionError("The media could not be transcribed.") from exc
     if not isinstance(result, Mapping):
@@ -74,6 +83,9 @@ def _documents_from_result(
         "source": Path(source_name or media_path).name,
         "source_type": source_type,
     }
+    language = result.get("language")
+    if isinstance(language, str) and language.strip():
+        metadata["language"] = language.strip()[:64]
     if asset_id is not None:
         metadata["asset_id"] = asset_id
 
@@ -136,11 +148,13 @@ def transcribe_documents(
     asset_id: str | None = None,
     source_name: str | None = None,
     source_type: str = "audio",
+    *,
+    audio_samples: np.ndarray | None = None,
 ) -> list[Document]:
     """Transcribe media into source records without discarding segment timing."""
     if source_type not in {"audio", "video"}:
         raise TranscriptionError("The media source type must be audio or video.")
-    result = _transcribe(media_path)
+    result = _transcribe(media_path, audio_samples=audio_samples)
     return _documents_from_result(result, media_path, asset_id, source_name, source_type)
 
 
