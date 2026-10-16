@@ -5,7 +5,7 @@ from typing import Literal
 from langchain_core.documents import Document
 from langchain_core.exceptions import OutputParserException
 from langchain_core.messages import BaseMessage
-from langchain_core.runnables import Runnable, RunnableConfig, RunnableLambda, RunnablePassthrough
+from langchain_core.runnables import Runnable, RunnableBranch, RunnableConfig, RunnableLambda, RunnablePassthrough
 from pydantic import BaseModel, ValidationError
 from typing_extensions import NotRequired, TypedDict
 
@@ -28,7 +28,10 @@ from chains.contracts import (
     ChainInputError, ProviderExecutionError, StructuredOutputError,
     requested_question, structured_output, text_output,
 )
-from chains.schemes.QuestionSchem import Feedback, GenerationResult, GradeQuestion, Question, RevisionResult
+from chains.schemes.QuestionSchem import (
+    Feedback, GenerationResult, GradeQuestion, MCQGenerationResult, MCQRevisionResult,
+    Question, RevisionResult, TrueFalseGenerationResult, TrueFalseRevisionResult,
+)
 from chains.schemes.SummarySchem import SummaryStructureRevision
 from chains.schemes.RAGSchem import EvidenceDecision, GroundedAnswer, GroundingAssessment, QueryRewrite
 
@@ -254,8 +257,13 @@ def _revision_result(value):
 
 
 def build_question_generation_chain(llm) -> Runnable:
+    generate = RunnableBranch(
+        (lambda value: value["question_type"] == "T/F",
+         QuestionGenPrompt | _model_boundary(llm, TrueFalseGenerationResult)),
+        QuestionGenPrompt | _model_boundary(llm, MCQGenerationResult),
+    )
     return (RunnableLambda(_generation_inputs)
-            | RunnablePassthrough.assign(_result=QuestionGenPrompt | _model_boundary(llm, GenerationResult))
+            | RunnablePassthrough.assign(_result=generate)
             | RunnableLambda(_generation_result)).with_types(input_type=GenerationInput, output_type=GenerationResult)
 
 
@@ -266,8 +274,13 @@ def build_question_review_chain(llm) -> Runnable:
 
 
 def build_question_revision_chain(llm) -> Runnable:
+    revise = RunnableBranch(
+        (lambda value: value["question_type"] == "T/F",
+         QuestionRewriterPrompt | _model_boundary(llm, TrueFalseRevisionResult)),
+        QuestionRewriterPrompt | _model_boundary(llm, MCQRevisionResult),
+    )
     return (RunnableLambda(_revision_inputs)
-            | RunnablePassthrough.assign(_result=QuestionRewriterPrompt | _model_boundary(llm, RevisionResult))
+            | RunnablePassthrough.assign(_result=revise)
             | RunnableLambda(_revision_result)).with_types(input_type=RevisionInput, output_type=RevisionResult)
 
 
@@ -376,4 +389,18 @@ def build_task_chain(task: str, llm) -> Runnable:
         builder = TASK_BUILDERS[task]
     except (KeyError, TypeError):
         raise ChainInputError("Unknown LLM task") from None
-    return builder(llm).with_config(run_name=task)
+    chain = builder(llm)
+    if task in {"question_generation", "question_revision"}:
+        retried = chain.with_retry(
+            retry_if_exception_type=(StructuredOutputError,),
+            stop_after_attempt=2, wait_exponential_jitter=False,
+        )
+        if task == "question_revision":
+            # Automatic refinement accounts for one provider call per graph node.
+            chain = RunnableBranch(
+                (lambda value: isinstance(value, Mapping) and value.get("action") == "refine", chain),
+                retried,
+            )
+        else:
+            chain = retried
+    return chain.with_config(run_name=task)

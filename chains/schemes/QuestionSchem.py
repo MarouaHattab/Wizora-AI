@@ -60,6 +60,26 @@ class GenerationResult(StructuredResult):
         return self
 
 
+class TrueFalseQuestion(Question):
+    question_type: Literal["T/F"]
+    options: None
+    answer: Literal["True", "False"]
+
+
+class MCQQuestion(Question):
+    question_type: Literal["MCQ"]
+    options: list[NonemptyText] = Field(min_length=4, max_length=4)
+    answer: Literal["A", "B", "C", "D"]
+
+
+class TrueFalseGenerationResult(GenerationResult):
+    question: TrueFalseQuestion | None
+
+
+class MCQGenerationResult(GenerationResult):
+    question: MCQQuestion | None
+
+
 class RevisionResult(StructuredResult):
     status: Literal["revised", "unchanged"]
     question: Question
@@ -72,6 +92,14 @@ class RevisionResult(StructuredResult):
         if self.status == "unchanged" and self.reason is None:
             raise ValueError("Unchanged results require a reason describing the conflicting request")
         return self
+
+
+class TrueFalseRevisionResult(RevisionResult):
+    question: TrueFalseQuestion
+
+
+class MCQRevisionResult(RevisionResult):
+    question: MCQQuestion
 
 
 class ReviewIssue(StructuredResult):

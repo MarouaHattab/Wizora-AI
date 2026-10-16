@@ -114,13 +114,14 @@ def _model_key(task, settings):
     if provider == "GROQ" and temperature == 0:
         temperature = 1e-8
     return (_scope(), provider, model_id, temperature, timeout,
-            _credential_fingerprint(settings, provider))
+            _credential_fingerprint(settings, provider),
+            _setting(settings, "OLLAMA_NUM_CTX", 16384) if provider == "OLLAMA" else None)
 
 
 def _resolve_model(settings, model_key):
     model = _models.get(model_key)
     if model is None:
-        _, provider, model_id, temperature, timeout, _ = model_key
+        _, provider, model_id, temperature, timeout, _, _ = model_key
         try:
             model = LLMProviderFactory(settings).create(provider, model_id, temperature, timeout)
         except Exception as exc:
@@ -144,7 +145,7 @@ def get_task_chain(task: str, settings, *, llm=None) -> Runnable:
             _chains.move_to_end(chain_key)
             return _chains[chain_key][0]
         model = _resolve_model(settings, model_key)
-        _, provider, model_id, _, _, _ = model_key
+        _, provider, model_id, _, _, _, _ = model_key
         chain = observe_chain(
             build_task_chain(task, model), task=task, provider=provider, model=model_id,
         )

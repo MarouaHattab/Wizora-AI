@@ -271,7 +271,11 @@ def load_asset_documents(asset_id, context=None):
         raise InvalidDocumentError("Unable to read valid asset records") from exc
 
 
-def load_asset_text(asset_id):
+def load_asset_source(asset_id):
+    """Return the exact stored text and its validated source records together."""
     text = _read_text(asset_id)
-    load_asset_documents(asset_id, context=text)
-    return text
+    return text, load_asset_documents(asset_id, context=text)
+
+
+def load_asset_text(asset_id):
+    return load_asset_source(asset_id)[0]

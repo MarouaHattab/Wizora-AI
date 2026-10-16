@@ -14,10 +14,25 @@ body { background: #ffffff !important; }
     background: #ffffff !important; color: #1f2937 !important; color-scheme: light; }
 .header { text-align: center; }
 .gradio-container textarea, .gradio-container input { color: #1f2937 !important; background: #ffffff !important; }
-.gradio-container [role="tablist"] { background: linear-gradient(90deg, #667eea 0%, #764ba2 100%) !important;
-    border-radius: 8px 8px 0 0; padding: 6px !important; gap: 4px; }
-.gradio-container [role="tab"] { color: white !important; border-radius: 6px !important; border: none !important; }
-.gradio-container [role="tab"][aria-selected="true"] { background: rgba(255,255,255,.22) !important; }
+.gradio-container #workflow-tabs .tab-wrapper { height: auto; min-height: 44px; padding-bottom: 0; }
+.gradio-container #workflow-tabs .tab-container { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr));
+    align-items: stretch; box-sizing: border-box; height: auto; gap: 4px; padding: 6px !important; }
+.gradio-container #workflow-tabs .tab-container.visually-hidden { width: 100%; }
+.gradio-container #workflow-tabs [role="tablist"] { background: linear-gradient(90deg, #667eea 0%, #764ba2 100%) !important;
+    border-radius: 8px 8px 0 0; overflow: visible; }
+.gradio-container #workflow-tabs .tab-container button { justify-content: center; min-width: 0;
+    min-height: 44px; padding: 10px 8px; white-space: normal; line-height: 1.35; text-align: center; }
+.gradio-container #workflow-tabs [role="tab"] { color: white !important; border-radius: 6px !important;
+    border: none !important; background: transparent !important; }
+.gradio-container #workflow-tabs [role="tab"]:hover:not(:disabled),
+.gradio-container #workflow-tabs [role="tab"]:focus-visible,
+.gradio-container #workflow-tabs [role="tab"][aria-selected="true"] {
+    background: #563690 !important; color: #ffffff !important; }
+.gradio-container #workflow-tabs [role="tab"]:focus-visible { outline: 2px solid #ffffff; outline-offset: -4px; }
+.gradio-container #workflow-tabs [role="tab"][aria-selected="true"]::after { background: #ffffff !important; }
+@media (max-width: 720px) {
+    .gradio-container #workflow-tabs .tab-container { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
 .upload-area { border: 2px dashed #e0e7ff !important; border-radius: 12px !important;
     background: #f8fafc !important; transition: all .3s ease !important; }
 .upload-area:hover { border-color: #4f46e5 !important; background: #f1f5f9 !important; }
@@ -39,8 +54,8 @@ def empty_state():
         "asset_id": "", "asset": {}, "extracted_text": "",
         "question": {}, "summary": {}, "qa": {},
         "upload_status": "📋 Ready to upload a file",
-        "question_status": "📋 Ready to generate questions",
-        "summary_status": "📋 Ready to generate summaries",
+        "question_status": "📋 Generate a question first to enable revision and Accept / Save.",
+        "summary_status": "📋 Click Generate Summary first to enable Update Summary and Accept / Save.",
         "qa_status": "📋 Ready to start Q&A session",
     }
 
@@ -67,6 +82,11 @@ class GradioUI:
         return deepcopy(value) if isinstance(value, dict) else empty_state()
 
     @staticmethod
+    def _review_pending(current):
+        return bool(current.get("status") == "interrupted_for_feedback" and current.get("thread_id")
+                    and current.get("review_id") and not current.get("busy"))
+
+    @staticmethod
     def render(state, *, clear_inputs=False, clear_message=False):
         question, summary, qa = (state.get(key, {}) for key in ("question", "summary", "qa"))
         draft = question.get("result", {})
@@ -78,6 +98,8 @@ class GradioUI:
                 {"role": "assistant", "content": pending.get("text", "")},
             ])
         clear = "" if clear_inputs else gr.skip()
+        question_ready = GradioUI._review_pending(question)
+        summary_ready = GradioUI._review_pending(summary)
         return (
             state, *([state.get("asset_id", "")] * 4),
             state["upload_status"], state.get("extracted_text", ""),
@@ -87,6 +109,8 @@ class GradioUI:
             summary.get("preview_summary", summary.get("text", "")), state["summary_status"],
             history, state["qa_status"], clear, clear, clear,
             "" if clear_inputs or clear_message else gr.skip(),
+            *[gr.update(interactive=question_ready) for _ in range(3)],
+            *[gr.update(interactive=summary_ready) for _ in range(2)],
         )
 
     def select_asset(self, asset_id, value):
@@ -155,9 +179,16 @@ class GradioUI:
         yield self.render(state)
 
     @staticmethod
-    def _review(current):
-        if current.get("status") != "interrupted_for_feedback" or not current.get("thread_id") or not current.get("review_id"):
-            raise BackendError("No question or summary is awaiting review. Generate a new result first", 409)
+    def _review(current, workflow):
+        if not GradioUI._review_pending(current):
+            label = "Generate " + workflow
+            if current.get("error"):
+                message = f"The previous {workflow.lower()} attempt failed: {current['error']}. Click {label} to try again before updating or saving."
+            elif current.get("status") == "completed":
+                message = f"This {workflow.lower()} is already saved. Click {label} to create another result."
+            else:
+                message = f"Click {label} first. Revision and Accept / Save become available after a {workflow.lower()} is generated."
+            raise BackendError(message, 409)
 
     @staticmethod
     def _question_result(response):
@@ -185,10 +216,11 @@ class GradioUI:
                 current = {}
                 state["question"] = current
             else:
-                self._review(current)
+                self._review(current, "Question")
                 if not feedback.strip():
                     raise BackendError("Please provide feedback for the question", 422)
             state["question_status"] = "🔄 Generating question…" if feedback is None else "🔄 Updating question…"
+            current["busy"] = True
             yield self.render(state)
             response = (await self.client.start_question(selected, question_type) if feedback is None else
                         await self.client.feedback_question(current["thread_id"], feedback.strip(), current["review_id"]))
@@ -202,14 +234,22 @@ class GradioUI:
             if current.get("notice"):
                 state["question_status"] += "\n\n" + markdown_text(current["notice"])
         except BackendError as error:
+            if feedback is None:
+                current = state.setdefault("question", {})
             state["question_status"] = "❌ " + error.detail
-            if feedback is not None and error.status_code not in {400, 404, 409, 422}:
+            if feedback is not None and current.get("busy"):
                 current["status"] = "uncertain"
                 current["review_id"] = None
+                current["error"] = error.detail
                 state["question_status"] += " Generate a new question before submitting more feedback."
+            elif feedback is None:
+                current.update(status="failed", review_id=None, error=error.detail)
         except Exception:
-            current.update(status="failed", review_id=None)
+            current = state.setdefault("question", {})
+            current.update(status="failed", review_id=None, error="Question generation failed. Check the backend logs")
             state["question_status"] = "❌ Question generation failed. Check the backend logs and generate a new question."
+        finally:
+            state.get("question", {}).pop("busy", None)
         yield self.render(state)
 
     async def start_question(self, asset_id, question_type, value):
@@ -238,11 +278,12 @@ class GradioUI:
                 state["summary"] = current
                 events = self.client.summary_events(asset_id=selected)
             else:
-                self._review(current)
+                self._review(current, "Summary")
                 if not feedback.strip():
                     raise BackendError("Please provide feedback for the summary", 422)
                 events = self.client.summary_events(thread_id=current["thread_id"], feedback=feedback.strip(), review_id=current["review_id"])
             current["status"] = "running"
+            current["busy"] = True
             state["summary_status"] = "🔄 Generating summary…" if feedback is None else "🔄 Updating summary…"
             yield self.render(state)
             async for event in events:
@@ -282,16 +323,25 @@ class GradioUI:
             if current.get("notice"):
                 state["summary_status"] += "\n\n" + markdown_text(current["notice"])
         except BackendError as error:
+            if feedback is None:
+                current = state.setdefault("summary", {})
             if current.get("status") == "running" or error.status_code not in {400, 404, 409, 422}:
-                current.update(status="failed", review_id=None)
+                current.update(status="failed", review_id=None, error=error.detail)
+            elif feedback is None:
+                current.update(status="failed", review_id=None, error=error.detail)
             current.pop("preview_outline", None)
             current.pop("preview_summary", None)
             state["summary_status"] = "❌ " + error.detail
+            if current.get("status") == "failed" and "Generate Summary" not in error.detail:
+                state["summary_status"] += " Click Generate Summary to try again. Update Summary and Accept / Save require a successfully generated summary."
         except Exception:
-            current.update(status="failed", review_id=None)
+            current = state.setdefault("summary", {})
+            current.update(status="failed", review_id=None, error="Summary generation failed. Check the backend logs")
             current.pop("preview_outline", None)
             current.pop("preview_summary", None)
-            state["summary_status"] = "❌ Summary generation failed. Check the backend logs and generate a new summary."
+            state["summary_status"] = "❌ Summary generation failed. Check the backend logs, then click Generate Summary to try again."
+        finally:
+            state.get("summary", {}).pop("busy", None)
         yield self.render(state)
 
     async def start_summary(self, asset_id, value):
@@ -428,7 +478,7 @@ def create_gradio_interface(client=None):
     with gr.Blocks(title="Wizora-AI — AI Teaching Assistant", analytics_enabled=False) as app:
         state = gr.State(empty_state)
         gr.Markdown("# 🎓 Wizora-AI\n### AI Teaching Assistant\nUpload content, generate questions, create summaries and chat with your materials.", elem_classes="header")
-        with gr.Tabs():
+        with gr.Tabs(elem_id="workflow-tabs"):
             with gr.Tab("📁 Upload Content", elem_id="upload-tab"):
                 gr.Markdown("### Upload a PDF, DOCX, audio or video file for processing")
                 with gr.Row():
@@ -454,10 +504,10 @@ def create_gradio_interface(client=None):
                         explanation = gr.Textbox(label="Explanation", lines=3, interactive=False)
                 with gr.Row():
                     q_feedback = gr.Textbox(label="Feedback", placeholder="Provide feedback to improve the question…", lines=2, scale=3)
-                    update_q = gr.Button("🔄 Update Question", scale=1)
+                    update_q = gr.Button("🔄 Update Question", scale=1, interactive=False)
                 with gr.Row():
-                    refine_q = gr.Button("✨ Automatically Refine")
-                    accept_q = gr.Button("✅ Accept / Save Question")
+                    refine_q = gr.Button("✨ Automatically Refine", interactive=False)
+                    accept_q = gr.Button("✅ Accept / Save Question", interactive=False)
                 q_status = gr.Markdown(empty_state()["question_status"], elem_classes="status")
             with gr.Tab("📝 Content Summarization", elem_id="summary-tab"):
                 gr.Markdown("### Create summaries and main points from your content")
@@ -466,8 +516,8 @@ def create_gradio_interface(client=None):
                         s_asset = gr.Textbox(label="Asset ID", placeholder="Populated automatically after upload…")
                         generate_s = gr.Button("📊 Generate Summary", variant="primary", elem_classes="button-primary")
                         s_feedback = gr.Textbox(label="Feedback", placeholder="Describe wording changes or how to reorganize the outline and sections…", lines=3)
-                        update_s = gr.Button("🔄 Update Summary")
-                        accept_s = gr.Button("✅ Accept / Save Summary")
+                        update_s = gr.Button("🔄 Update Summary", interactive=False)
+                        accept_s = gr.Button("✅ Accept / Save Summary", interactive=False)
                     with gr.Column(scale=2):
                         main_points = gr.Textbox(label="Main Points", lines=6, interactive=False, buttons=["copy"])
                         summary = gr.Textbox(label="Detailed Summary", lines=8, interactive=False, buttons=["copy"])
@@ -488,7 +538,8 @@ def create_gradio_interface(client=None):
         gr.Markdown("---\n### 💡 How to Use\n1. **Upload:** Select one PDF, DOCX, audio or video file. Its Asset ID appears in every tab.\n2. **Questions:** Generate a question, provide feedback, refine automatically, then accept/save.\n3. **Summary:** Create main points and a detailed summary, revise, then accept/save.\n4. **Chat:** Start a conversation and ask follow-up questions about the selected file.")
         outputs = [state, asset_id, q_asset, s_asset, qa_asset, upload_status, extracted, question, options, answer,
                    explanation, q_status, main_points, summary, s_status, chatbot, qa_status,
-                   q_feedback, s_feedback, initial_question, message]
+                   q_feedback, s_feedback, initial_question, message,
+                   update_q, refine_q, accept_q, update_s, accept_s]
         event_options = dict(outputs=outputs, concurrency_limit=1, concurrency_id="single-file-workflow", trigger_mode="once", show_progress="minimal")
         upload_btn.click(ui.upload_file, [file_input, state], **event_options)
         load_btn.click(ui.load_text, [asset_id, state], **event_options)

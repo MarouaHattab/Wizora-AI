@@ -64,6 +64,7 @@ class Settings(BaseSettings):
     CHUNKING_STRATEGY: Literal["recursive", "token"] = "recursive"
 
     LLM_TIMEOUT_SECONDS: float = Field(default=60, gt=0, allow_inf_nan=False)
+    OLLAMA_NUM_CTX: int = Field(default=16384, ge=2048, le=131072)
     GRAPH_TIMEOUT_SECONDS: float = Field(default=180, gt=0, allow_inf_nan=False)
     QA_HISTORY_MESSAGES: int = Field(default=12, ge=2)
     QA_HISTORY_CHARACTERS: int = Field(default=12000, ge=256)

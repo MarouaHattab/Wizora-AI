@@ -67,6 +67,7 @@ class LLMProviderFactory:
 
         if provider == LLMEnums.OLLAMA.value:
             return ChatOllama(model=model_id, temperature=temperature,
+                              num_ctx=self._setting("OLLAMA_NUM_CTX", 16384),
                               client_kwargs={"timeout": timeout_seconds})
         elif provider == LLMEnums.GOOGLE_GENAI.value:
             identifier = model_id.removeprefix("models/").lower()
