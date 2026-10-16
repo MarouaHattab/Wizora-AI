@@ -1,6 +1,7 @@
 import json
 import os
 import shutil
+import time
 from collections import Counter
 from datetime import datetime, timezone
 from pathlib import PurePosixPath
@@ -12,6 +13,17 @@ from .asset_paths import asset_directory, validate_asset_id
 from .ingestion_errors import AssetNotFoundError, InvalidAssetError, StorageError
 
 _lock = RLock()
+
+
+def _status_io(operation):
+    for attempt in range(6):
+        try:
+            return operation()
+        except PermissionError:
+            if os.name != "nt" or attempt == 5:
+                raise
+            # Windows scanners can briefly hold an otherwise closed status file.
+            time.sleep(.02 * 2 ** attempt)
 
 
 def _now():
@@ -32,7 +44,7 @@ def read_job(asset_id):
     path = _job_path(asset_id)
     try:
         with _lock:
-            value = json.loads(path.read_text(encoding="utf-8"))
+            value = json.loads(_status_io(lambda: path.read_text(encoding="utf-8")))
         if not isinstance(value, dict) or value.get("id") != asset_id:
             raise StorageError("Invalid processing status")
         return value
@@ -45,14 +57,19 @@ def read_job(asset_id):
 def write_job(asset_id, **updates):
     with _lock:
         path = _job_path(asset_id)
-        value = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {"id": asset_id, "created_at": _now(), "stages": []}
-        value.update(updates, updated_at=_now())
         temporary = path.with_suffix(f".{uuid4().hex}.tmp")
         try:
+            value = json.loads(_status_io(lambda: path.read_text(encoding="utf-8"))) if path.exists() else {"id": asset_id, "created_at": _now(), "stages": []}
+            if not isinstance(value, dict) or value.get("id") != asset_id:
+                raise StorageError("Invalid processing status")
+            value.update(updates, updated_at=_now())
             temporary.write_text(json.dumps(value, ensure_ascii=False, allow_nan=False), encoding="utf-8")
-            temporary.replace(path)
+            _status_io(lambda: temporary.replace(path))
         except (OSError, ValueError) as exc:
-            temporary.unlink(missing_ok=True)
+            try:
+                temporary.unlink(missing_ok=True)
+            except OSError:
+                pass
             raise StorageError("Unable to record processing status") from exc
         return value
 
@@ -144,7 +161,8 @@ def recover_interrupted_uploads():
     directory = asset_paths.ASSETS_ROOT.resolve() / ".jobs"
     for path in directory.glob("*.json") if directory.is_dir() else ():
         try:
-            value = json.loads(path.read_text(encoding="utf-8"))
+            with _lock:
+                value = json.loads(_status_io(lambda: path.read_text(encoding="utf-8")))
             if (isinstance(value, dict) and value.get("id") == path.stem
                     and value.get("status") in ("queued", "processing")):
                 write_job(value["id"], status="failed", error={"category": "interrupted", "detail": "Processing was interrupted. Upload the file again."})

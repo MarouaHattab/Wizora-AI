@@ -198,9 +198,9 @@ def _require_ready(asset_id):
         raise StorageError("Invalid processing status directory")
     try:
         # Windows replacement and open read handles must share the catalog lock.
-        from .asset_catalog import _lock as status_lock
+        from .asset_catalog import _lock as status_lock, _status_io
         with status_lock:
-            payload = path.read_text(encoding="utf-8")
+            payload = _status_io(lambda: path.read_text(encoding="utf-8"))
     except FileNotFoundError:
         return
     except UnicodeError as exc:
