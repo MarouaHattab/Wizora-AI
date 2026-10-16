@@ -4,14 +4,14 @@ import time
 import uuid
 from typing import AsyncGenerator
 
-from fastapi import APIRouter, Body, HTTPException
+from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
 from langgraph.types import Command
 
 from chains.contracts import text_fragment, text_output
 from controllers.GraphState import SummaryGenState
 from helper import get_settings
-from helper.asset_http import read_asset_text
+from helper.asset_http import ReviewFeedbackRequest, SingleAssetRequest, read_asset_text, validate_session_asset
 from helper.failures import StorageUnavailable
 from helper.session_review import (
     SessionStreamingResponse, accept_feedback, acquire_session,
@@ -24,6 +24,14 @@ from helper.workflow_runtime import note_snapshot, require_graph
 router = APIRouter()
 settings = get_settings()
 logger = logging.getLogger(__name__)
+
+
+class SummaryRequest(SingleAssetRequest):
+    event_version: EventVersion = "legacy"
+
+
+class SummaryFeedbackRequest(ReviewFeedbackRequest):
+    event_version: EventVersion = "legacy"
 
 
 def summary_feedback(snapshot):
@@ -183,13 +191,12 @@ async def stream_session(
 
 @router.post("/start_session_streaming")
 async def start_summarization_session_streaming(
-    asset_id: str = Body(..., embed=True),
-    event_version: EventVersion = Body("legacy", embed=True),
+    request: SummaryRequest,
 ) -> StreamingResponse:
     thread_id = str(uuid.uuid4())
-    context = await read_asset_text(asset_id)
+    context = await read_asset_text(request.asset_id)
     initial_state = SummaryGenState(
-        asset_id=asset_id, context=context, summary="", feedback="", Main_Points="",
+        asset_id=request.asset_id, context=context, summary="", feedback="", Main_Points="",
         human_feedback_text="", critic_feedback=None, feedback_review_id=None,
         history=[], revision_requirements=[], state_version=4,
     )
@@ -199,7 +206,7 @@ async def start_summarization_session_streaming(
     return SessionStreamingResponse(
         stream_session(
             thread_id, initial_state, config, lock, "starting_session", graph,
-            event_version=event_version,
+            event_version=request.event_version,
         ),
         session_lock=lock, media_type="text/event-stream",
     )
@@ -207,17 +214,16 @@ async def start_summarization_session_streaming(
 
 @router.post("/provide_feedback_streaming")
 async def provide_feedback_to_summarization_streaming(
-    thread_id: str = Body(..., embed=True),
-    feedback: str = Body(..., embed=True),
-    review_id: str | None = Body(None, embed=True),
-    event_version: EventVersion = Body("legacy", embed=True),
+    request: SummaryFeedbackRequest,
 ) -> StreamingResponse:
+    thread_id, feedback, review_id = request.thread_id, request.feedback, request.review_id
     config = {"configurable": {"thread_id": thread_id}}
     graph = require_graph("summarization")
     lock = acquire_session("summarization", thread_id)
     try:
         snapshot = await graph.aget_state(config)
         validate_feedback("summarization", thread_id, snapshot, feedback, review_id)
+        await validate_session_asset(snapshot.values)
         metrics.increment("workflow_resume", workflow="summarization")
     except HTTPException:
         lock.release()
@@ -237,7 +243,7 @@ async def provide_feedback_to_summarization_streaming(
             Command(resume={"feedback": feedback, "review_id": review_revision(snapshot)}),
             config, lock, "resuming_with_feedback", graph,
             review=(snapshot, feedback, review_id),
-            event_version=event_version,
+            event_version=request.event_version,
         ),
         session_lock=lock, media_type="text/event-stream",
     )

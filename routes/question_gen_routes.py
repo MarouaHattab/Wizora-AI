@@ -2,7 +2,7 @@ import asyncio
 import sqlite3
 import time
 import uuid
-from fastapi import APIRouter, HTTPException, Body
+from fastapi import APIRouter, HTTPException
 from typing import Literal
 from langgraph.types import Command
 from langchain_core.exceptions import OutputParserException
@@ -16,7 +16,7 @@ from chains.contracts import (
 from helper import get_settings
 from helper.failures import StorageUnavailable
 from helper.session_review import acquire_session, accept_feedback, review_revision, session_status
-from helper.asset_http import read_asset_text
+from helper.asset_http import ReviewFeedbackRequest, SingleAssetRequest, read_asset_text, validate_session_asset
 from helper.question_review import REVIEW_MESSAGE
 from helper.workflow_history import critic_feedback_value, normalize_review_state
 from helper.workflow_metrics import metrics
@@ -24,6 +24,11 @@ from helper.workflow_runtime import note_snapshot, require_graph
 
 router = APIRouter()
 settings = get_settings()
+
+
+class QuestionGenerationRequest(SingleAssetRequest):
+    question_type: Literal["T/F", "MCQ"]
+
 
 def question_response(thread_id, snapshot):
     status = session_status(snapshot)
@@ -83,14 +88,13 @@ def _storage_error(exc):
 
 @router.post("/start_session")
 async def start_question_generation_session(
-    asset_id: str = Body(..., embed=True),
-    question_type: Literal["T/F", "MCQ"] = Body(..., embed=True)
+    request: QuestionGenerationRequest,
 ):
     thread_id = str(uuid.uuid4())
-    context = await read_asset_text(asset_id, for_question=True)
+    context = await read_asset_text(request.asset_id, for_question=True)
 
     initial_state = QuestionGenState(
-        asset_id=asset_id, context=context, question_type=question_type,
+        asset_id=request.asset_id, context=context, question_type=request.question_type,
         question="", options=None, answer="", explanation="", history=[],
         feedback="", human_feedback_text="", critic_feedback=None,
         feedback_review_id=None, revision_requirements=[], state_version=4,
@@ -136,10 +140,9 @@ async def start_question_generation_session(
 
 @router.post("/provide_feedback")
 async def provide_feedback_to_question_generation(
-    thread_id: str = Body(..., embed=True),
-    feedback: str = Body(..., embed=True),
-    review_id: str | None = Body(None, embed=True),
+    request: ReviewFeedbackRequest,
 ):
+    thread_id, feedback, review_id = request.thread_id, request.feedback, request.review_id
     config = {"configurable": {"thread_id": thread_id}}
     request_id = uuid.uuid4().hex[:12]
     graph = _question_graph()
@@ -148,6 +151,7 @@ async def provide_feedback_to_question_generation(
     try:
         async with asyncio.timeout(settings.GRAPH_TIMEOUT_SECONDS):
             snapshot = await graph.aget_state(config)
+            await validate_session_asset(snapshot.values)
             accept_feedback("question_generation", thread_id, snapshot, feedback, review_id)
             metrics.increment("workflow_resume", workflow="question_generation")
             await graph.ainvoke(Command(resume={

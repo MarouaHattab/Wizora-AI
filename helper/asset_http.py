@@ -1,11 +1,26 @@
 import anyio
 from fastapi import HTTPException
+from pydantic import BaseModel, ConfigDict
 
 from .asset_storage import load_asset_text
 from .ingestion_errors import (
     AssetNotFoundError, EmptyContentError, InvalidAssetError, InvalidDocumentError,
     ModelInitializationError, ProcessingError, StorageError, TranscriptionError,
 )
+
+
+class WorkflowRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+
+class SingleAssetRequest(WorkflowRequest):
+    asset_id: str
+
+
+class ReviewFeedbackRequest(WorkflowRequest):
+    thread_id: str
+    feedback: str
+    review_id: str | None = None
 
 
 def processing_http_error(error):
@@ -35,3 +50,16 @@ async def read_asset_text(asset_id, *, for_question=False):
                 "status": "insufficient_source", "reason": "The source contains no educational material.",
             }) from None
         raise processing_http_error(exc) from None
+
+
+async def validate_session_asset(state):
+    if not state:
+        return
+    if not state.get("asset_id") or not isinstance(state.get("context"), str):
+        raise HTTPException(status_code=409, detail="Session has no asset context. Start a new session.")
+    context = await read_asset_text(state["asset_id"])
+    if context != state["context"]:
+        raise HTTPException(
+            status_code=409,
+            detail="Session content does not match the selected asset. Start a new session.",
+        )

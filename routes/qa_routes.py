@@ -3,13 +3,13 @@ import sqlite3
 import time
 import uuid
 
-from fastapi import APIRouter, Body, HTTPException
+from fastapi import APIRouter, HTTPException
 from langchain_core.messages import AIMessage, HumanMessage
 
 from controllers.GraphState import QuestionAnswerState
 from controllers.QuestionAnswerGraphController import message_text
 from helper import get_settings
-from helper.asset_http import read_asset_text
+from helper.asset_http import SingleAssetRequest, WorkflowRequest, read_asset_text, validate_session_asset
 from helper.failures import StorageUnavailable
 from helper.session_review import SessionStreamingResponse, acquire_session, session_status
 from helper.sse import EventStream, EventVersion, before_deadline, close_events, events_before, public_error
@@ -20,6 +20,17 @@ from helper.workflow_runtime import note_snapshot, require_graph
 router = APIRouter()
 settings = get_settings()
 logger = logging.getLogger(__name__)
+
+
+class QARequest(SingleAssetRequest):
+    initial_question: str
+    event_version: EventVersion = "legacy"
+
+
+class QAContinueRequest(WorkflowRequest):
+    thread_id: str
+    next_question: str
+    event_version: EventVersion = "legacy"
 
 
 _QA_NODES = {
@@ -134,34 +145,31 @@ def _stream_response(payload, config, metadata, session_lock, graph, event_versi
 
 @router.post("/start_session_stream")
 async def start_qa_session_stream(
-    asset_id: str = Body(..., embed=True),
-    initial_question: str = Body(..., embed=True),
-    event_version: EventVersion = Body("legacy", embed=True),
+    request: QARequest,
 ):
-    if not initial_question.strip():
+    if not request.initial_question.strip():
         raise HTTPException(status_code=422, detail="Question must not be empty")
-    context = await read_asset_text(asset_id)
+    context = await read_asset_text(request.asset_id)
     thread_id = str(uuid.uuid4())
     initial_state = QuestionAnswerState(
-        asset_id=asset_id,
-        messages=[HumanMessage(content=initial_question, id=str(uuid.uuid4()))],
+        asset_id=request.asset_id,
+        messages=[HumanMessage(content=request.initial_question, id=str(uuid.uuid4()))],
         relevant_text=[], on_topic="", context=context, state_version=4, history_trimmed=0,
     )
     config = {"configurable": {"thread_id": thread_id}, "recursion_limit": 12}
     graph = require_graph("qa")
     session_lock = acquire_session("qa", thread_id)
     return _stream_response(
-        initial_state, config, {"thread_id": thread_id, "asset_id": asset_id},
-        session_lock, graph, event_version,
+        initial_state, config, {"thread_id": thread_id, "asset_id": request.asset_id},
+        session_lock, graph, request.event_version,
     )
 
 
 @router.post("/continue_conversation_stream")
 async def continue_qa_conversation_stream(
-    thread_id: str = Body(..., embed=True),
-    next_question: str = Body(..., embed=True),
-    event_version: EventVersion = Body("legacy", embed=True),
+    request: QAContinueRequest,
 ):
+    thread_id, next_question = request.thread_id, request.next_question
     if not next_question.strip():
         raise HTTPException(status_code=422, detail="Question must not be empty")
     config = {"configurable": {"thread_id": thread_id}, "recursion_limit": 12}
@@ -175,14 +183,13 @@ async def continue_qa_conversation_stream(
         if status != "completed":
             raise HTTPException(status_code=409, detail="Session has not completed its previous question")
         state = snapshot.values
-        if not state.get("asset_id") or not state.get("context"):
-            raise HTTPException(status_code=409, detail="Session has no asset context. Start a new session.")
+        await validate_session_asset(state)
         messages = canonical_messages(state)
         if not messages or not isinstance(messages[-1], AIMessage):
             raise HTTPException(status_code=409, detail="Session has no completed answer")
         payload = {"messages": [HumanMessage(content=next_question, id=str(uuid.uuid4()))]}
         metrics.increment("workflow_continue", workflow="qa")
-        return _stream_response(payload, config, {"thread_id": thread_id}, session_lock, graph, event_version)
+        return _stream_response(payload, config, {"thread_id": thread_id}, session_lock, graph, request.event_version)
     except HTTPException:
         session_lock.release()
         raise
