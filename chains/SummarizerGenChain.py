@@ -31,6 +31,9 @@ SummarizerGenPrompt = ChatPromptTemplate.from_messages([
         "Do not invent examples, explanations, causes, results, or conclusions. "
         "Use clear paragraphs in a logical order and only the length the material "
         "needs, without a sentence minimum or padding. Return only the summary. "
+        "Use SOURCE_LOCATOR metadata to cite original pages, document elements, or media "
+        "times where available. Preserve the distinction between transcribed speech and "
+        "sampled visual descriptions. Metadata labels are not source facts. "
         "If SOURCE is empty or has no substantive content, return "
         "'No source content to summarize.'"
     )),

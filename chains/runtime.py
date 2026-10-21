@@ -132,13 +132,21 @@ def _resolve_model(settings, model_key):
     return model
 
 
+def _input_budget(settings, model_key):
+    configured = int(_setting(settings, "GENERATION_CONTEXT_CHARACTERS", 24000))
+    if model_key[1] == "OLLAMA":
+        configured = min(configured, int(_setting(settings, "OLLAMA_NUM_CTX", 16384)) - 2048)
+    return configured
+
+
 def get_task_chain(task: str, settings, *, llm=None) -> Runnable:
     if not isinstance(task, str) or task not in TASK_CONFIGURATION:
         raise ChainInputError("Unknown LLM task")
     if llm is not None:
         return build_task_chain(task, llm)
     model_key = _model_key(task, settings)
-    chain_key = (task, model_key)
+    budget = _input_budget(settings, model_key)
+    chain_key = (task, model_key, budget)
     with _lock:
         _discard_closed_loops()
         if chain_key in _chains:
@@ -147,7 +155,8 @@ def get_task_chain(task: str, settings, *, llm=None) -> Runnable:
         model = _resolve_model(settings, model_key)
         _, provider, model_id, _, _, _, _ = model_key
         chain = observe_chain(
-            build_task_chain(task, model), task=task, provider=provider, model=model_id,
+            build_task_chain(task, model).with_config(configurable={"generation_input_budget": budget}),
+            task=task, provider=provider, model=model_id,
         )
         _remember(_chains, chain_key, (chain, model), _CHAIN_LIMIT)
         return chain
@@ -160,7 +169,7 @@ def get_task_token_counter(task: str, settings, *, llm=None, initialize=True):
     if llm is not None:
         return token_counter_for(llm)
     model_key = _model_key(task, settings)
-    chain_key = (task, model_key)
+    chain_key = (task, model_key, _input_budget(settings, model_key))
     with _lock:
         _discard_closed_loops()
         if chain_key in _chains:

@@ -29,15 +29,17 @@ def processing_http_error(error):
     if isinstance(error, AssetNotFoundError):
         return HTTPException(status_code=404, detail="Asset not found")
     if isinstance(error, EmptyContentError):
-        return HTTPException(status_code=422, detail="The source contains no extractable text")
+        return HTTPException(status_code=422, detail=str(error) or "The source contains no extractable text")
     if isinstance(error, InvalidDocumentError):
-        return HTTPException(status_code=422, detail="The source could not be processed as a valid document")
+        return HTTPException(status_code=422, detail=str(error) or "The source could not be processed as a valid document")
     if isinstance(error, ModelInitializationError):
-        return HTTPException(status_code=503, detail="The processing model is unavailable")
+        return HTTPException(status_code=503, detail=str(error) or "The processing model is unavailable")
     if isinstance(error, TranscriptionError):
-        return HTTPException(status_code=500, detail="Media transcription failed")
+        return HTTPException(status_code=500, detail=str(error) or "Media transcription failed")
     if isinstance(error, StorageError):
         return HTTPException(status_code=500, detail="Asset storage is unavailable")
+    if type(error) is ProcessingError:
+        return HTTPException(status_code=500, detail=str(error) or "Asset processing failed")
     return HTTPException(status_code=500, detail="Asset processing failed")
 
 

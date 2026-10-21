@@ -178,7 +178,7 @@ def _transcript(source, info, *, asset_id, source_name, settings, deadline, prog
             _progress(progress, "transcribing", segment=chunk_index + 1, segments=chunk_count)
             try:
                 segments = transcribe_documents(str(audio_path), asset_id, source_name, source_type,
-                                                audio_samples=samples)
+                                                audio_samples=samples, settings=settings, deadline=deadline)
             except ModelInitializationError:
                 raise
             except EmptyContentError:
@@ -212,8 +212,9 @@ def _process(path, *, asset_id, source_name, settings, progress, video):
         info = inspect_media(source, settings=settings, deadline=deadline)
         if video and not info.has_video:
             raise InvalidDocumentError("The uploaded video contains no video track.")
-        if video and not info.has_audio:
-            raise EmptyContentError("The video has no audio track to transcribe.")
+        vision_enabled = video and _setting(settings, "VISION_PROVIDER", "disabled") != "disabled"
+        if video and not info.has_audio and not vision_enabled:
+            raise EmptyContentError("The video has no audio track. Configure video vision to extract visible content.")
         if not video and not info.has_audio:
             raise InvalidDocumentError("The uploaded audio contains no audio track.")
         source_type = "video" if video else "audio"
@@ -222,11 +223,33 @@ def _process(path, *, asset_id, source_name, settings, progress, video):
             settings=settings, deadline=deadline, progress=progress, source_type=source_type)
         if audio_status in {"failed", "partial"}:
             raise ProcessingError(audio_reason)
+        warnings = []
+        files = []
+        frame_count = 0
+        if vision_enabled:
+            from tools.video_vision import analyze_video_frames
+            visual_documents, files = analyze_video_frames(source, info, asset_id=asset_id, source_name=source_name,
+                settings=settings, deadline=deadline, progress=progress)
+            frame_count = len(visual_documents)
+            documents.extend(visual_documents)
+            documents.sort(key=lambda document: (document.metadata.get("start", 0),
+                                                  document.metadata.get("content_type") == "visual_description"))
+            warnings.append("Video visuals use sampled frames; content between sampled timestamps may be omitted.")
+            if audio_status in {"unavailable", "empty"}:
+                warnings.append(audio_reason)
+        elif video:
+            warnings.append("Video vision is disabled. Only spoken audio was extracted; slides, diagrams and demonstrations were not analyzed.")
+        for number, document in enumerate(documents):
+            document.metadata["record_index"] = number
+        has_transcript = any(document.metadata.get("content_type") == "transcript" for document in documents)
+        scope = "transcript_and_visuals" if frame_count and has_transcript else "visual_only" if frame_count else "transcript_only"
         metadata = {"duration_seconds": info.duration_seconds, "audio_status": audio_status,
-                    "audio_reason": audio_reason, "processing_scope": "transcript_only"}
+                    "audio_reason": audio_reason, "processing_scope": scope, "files": files,
+                    "visual_status": "completed" if frame_count else "disabled", "frame_count": frame_count,
+                    "warnings": warnings}
         _remaining(deadline)
         if not documents:
-            raise EmptyContentError("The media contains no transcribed speech.")
+            raise EmptyContentError("The media contains no transcribed speech or analyzed visual content.")
         metadata["record_count"] = len(documents)
         return ProcessingResult(documents, metadata)
     finally:
@@ -238,5 +261,5 @@ def process_audio(path, *, asset_id, source_name, settings, progress=None) -> Pr
 
 
 def process_video(path, *, asset_id, source_name, settings, progress=None) -> ProcessingResult:
-    """Extract timestamped speech from a video without interpreting its images."""
+    """Extract speech and optionally interpret bounded, timestamped visual frames."""
     return _process(path, asset_id=asset_id, source_name=source_name, settings=settings, progress=progress, video=True)

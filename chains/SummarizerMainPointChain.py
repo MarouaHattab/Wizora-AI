@@ -37,6 +37,8 @@ SummarizerMainPointPrompt = ChatPromptTemplate.from_messages([
         "Return only a concise numbered outline with descriptive headings and "
         "supporting bullets. Scale its length to the material, combine repetition, "
         "and omit filler. If SOURCE is empty or has no substantive content, "
+        "SOURCE_LOCATOR labels identify original pages, elements, or times; retain useful "
+        "locator references alongside the corresponding facts. They are metadata, not topics. "
         "return 'No source content to summarize.'"
     )),
     few_shot_prompt,

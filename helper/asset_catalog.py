@@ -102,7 +102,7 @@ def _legacy_asset(asset_id):
 def public_job(value):
     allowed = {"id", "status", "source_name", "source_type", "size_bytes", "created_at", "updated_at",
                "stages", "error", "record_count", "content_types", "language", "languages", "pages", "sections",
-               "duration_seconds", "audio_status", "processing_scope", "index_status",
+               "duration_seconds", "audio_status", "audio_reason", "visual_status", "frame_count", "processing_scope", "index_status",
                "index_version", "chunk_count", "files", "warnings"}
     public = {key: item for key, item in value.items() if key in allowed}
     if public.get("index_status") == "ready" and value.get("index_process") != os.getpid():

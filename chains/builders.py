@@ -1,4 +1,5 @@
 import json
+import logging
 from collections.abc import Mapping
 from typing import Literal
 
@@ -36,9 +37,31 @@ from chains.schemes.SummarySchem import SummaryStructureRevision
 from chains.schemes.RAGSchem import EvidenceDecision, GroundedAnswer, GroundingAssessment, QueryRewrite
 
 
+logger = logging.getLogger("wizora.chains")
+
+
+def _log_structured_failure(schema, error):
+    """Log controlled schema/reason codes, never provider payloads or source text."""
+    causes, current, codes = set(), error, []
+    while current is not None and id(current) not in causes:
+        causes.add(id(current))
+        if isinstance(current, ValidationError):
+            for issue in current.errors(include_input=False, include_context=False):
+                message = issue.get("msg", "")
+                code = ("missing_unchanged_reason" if "Unchanged results require a" in message else
+                        "unexpected_revised_reason" if "Revised results require a null reason" in message else
+                        issue.get("type", "validation_error"))
+                codes.append(code)
+        current = current.__cause__ or current.__context__
+    logger.warning("Structured output rejected schema=%s issue_codes=%s exception_type=%s",
+                   schema.__name__ if schema is not None else "text", ",".join(dict.fromkeys(codes)) or "output_parser",
+                   type(error).__name__)
+
+
 class GenerationInput(TypedDict):
     context: str
     question_type: Literal["MCQ", "T/F"]
+    previous_questions: NotRequired[list[str]]
 
 
 class ReviewInput(GenerationInput):
@@ -131,7 +154,19 @@ def _feedback(value):
 
 def _generation_inputs(value):
     inputs = _mapping(value)
-    return {"context": _text(inputs, "context"), "question_type": _question_type(inputs)}
+    previous = inputs.get("previous_questions", [])
+    if not isinstance(previous, list) or any(not isinstance(item, str) for item in previous):
+        raise ChainInputError("Previous questions must be a list of text stems")
+    # A bounded recent list guides diversity; controllers check every saved stem.
+    selected, size = [], 0
+    for question in reversed(previous):
+        measured = len(question.encode("utf-8"))
+        if size + measured > 2000:
+            break
+        selected.append(question)
+        size += measured
+    return {"context": _text(inputs, "context"), "question_type": _question_type(inputs),
+            "previous_questions": _json(list(reversed(selected)))}
 
 
 def _review_inputs(value):
@@ -216,24 +251,122 @@ def _answer_inputs(value):
         raise ChainInputError("Invalid answer evidence or history") from exc
 
 
+def formatted_prompt_size(value, schema=None):
+    """Conservative local count shared by source planning and final dispatch."""
+    schema_text = json.dumps(schema.model_json_schema(), ensure_ascii=False) if schema is not None else ""
+    text = value.to_string() if hasattr(value, "to_string") else str(value)
+    messages = value.to_messages() if hasattr(value, "to_messages") else []
+    return len((text + "\n" + schema_text).encode("utf-8")) + 16 * (len(messages) + 2)
+
+
+def revision_source_limit(settings, workflow):
+    """Reserve raw source, a substantial draft, and downstream prompt overhead.
+
+    Structural summary revisions contain source, outline, and summary together.
+    Question revisions contain source and a full question object. Optional prior
+    history is fitted separately; current feedback is never shortened.
+    """
+    prefixes = (("QUESTION_GENERATER", "QUESTION_REFINER", "QUESTION_REWRITER")
+                if workflow == "question_generation" else
+                ("SUMMARIZER_MAINPOINT", "SUMMARIZER_WRITER", "SUMMARIZER_REWRITER"))
+    setting = lambda name, default=None: settings.get(name, default) if isinstance(settings, Mapping) else getattr(settings, name, default)
+    configured = int(setting("GENERATION_CONTEXT_CHARACTERS", 24000))
+    budgets = []
+    for prefix in prefixes:
+        provider = setting(prefix + "_PROVIDER")
+        if provider is not None:
+            budgets.append(min(configured, int(setting("OLLAMA_NUM_CTX", 16384)) - 2048)
+                           if provider == "OLLAMA" else configured)
+    if not budgets:
+        return None  # Pure callers may provide only character/chunk settings.
+    if workflow == "question_generation":
+        base = QuestionRewriterPrompt.invoke({"context": "", "question_type": "MCQ", "action": "revise",
+            "current_question": "{}", "feedback": "{}", "history": "[]"})
+        overhead = max(formatted_prompt_size(base, MCQRevisionResult), formatted_prompt_size(base, TrueFalseRevisionResult))
+        copies = 2
+    else:
+        base = SummarizerStructurePrompt.invoke({"context": "", "outline": "", "summary": "", "feedback": "{}"})
+        overhead = max(formatted_prompt_size(base, SummaryStructureRevision), formatted_prompt_size(
+            SummarizerRewriterPrompt.invoke({"context": "", "original_summary": "", "user_feedback": "{}"})))
+        copies = 3
+    return (min(budgets) - overhead - 1024) // copies
+
+
+def _fit_optional_history(prompt, schema=None, *, field="history"):
+    def fit(value, config: RunnableConfig):
+        budget = (config or {}).get("configurable", {}).get("generation_input_budget")
+        if budget is None:
+            return value
+        if type(budget) is not int or budget <= 0:
+            raise ChainInputError("The generation input budget must be a positive integer")
+        result = dict(value)
+        try:
+            payload = json.loads(result[field])
+        except (KeyError, TypeError, ValueError):
+            return result
+        history = payload if field == "history" else payload.get("prior") if isinstance(payload, dict) else None
+        if not isinstance(history, list):
+            return result
+        history = list(history)
+        while formatted_prompt_size(prompt.invoke(result), schema) > budget and history:
+            first = history[0]
+            if isinstance(first, Mapping) and isinstance(first.get("retained_requirements"), list) and first["retained_requirements"]:
+                requirements = first["retained_requirements"][1:]
+                if requirements:
+                    history[0] = {**first, "retained_requirements": requirements}
+                else:
+                    history.pop(0)
+            else:
+                history.pop(0)
+            result[field] = _json(history if field == "history" else {**payload, "prior": history})
+        # Mandatory source, current draft and feedback remain exact. The final
+        # model boundary raises explicitly if those alone still cannot fit.
+        return result
+    return RunnableLambda(fit, name="fit_optional_revision_history")
+
+
 def _model_boundary(llm, schema=None):
     try:
         model = llm.with_structured_output(schema) if schema is not None else llm
     except Exception as exc:
         raise ProviderExecutionError("The configured model could not prepare the requested task") from exc
 
+    def validate_prompt(value, config):
+        budget = (config or {}).get("configurable", {}).get("generation_input_budget")
+        if budget is None:
+            return
+        if type(budget) is not int or budget <= 0:
+            raise ChainInputError("The generation input budget must be a positive integer")
+        measured = formatted_prompt_size(value, schema)
+        if measured > budget:
+            raise ChainInputError("The formatted task, source, and history exceed the configured model context budget; no input was truncated")
+
+    def completed_result(result):
+        metadata = getattr(result, "response_metadata", {})
+        if isinstance(metadata, Mapping):
+            for name in ("finish_reason", "done_reason", "stop_reason"):
+                reason = metadata.get(name)
+                reason = str(getattr(reason, "name", reason)).lower()
+                if reason in {"length", "max_tokens", "max_token", "2"} or reason.endswith(".max_tokens"):
+                    raise ProviderExecutionError("The provider reached its output limit before completing the result")
+        return result
+
     def invoke(value, config: RunnableConfig):
+        validate_prompt(value, config)
         try:
-            return model.invoke(value, config=config)
+            return completed_result(model.invoke(value, config=config))
         except (OutputParserException, ValidationError) as exc:
+            _log_structured_failure(schema, exc)
             raise StructuredOutputError("The model returned an invalid structured result") from exc
         except Exception as exc:
             raise ProviderExecutionError("The configured model request failed") from exc
 
     async def ainvoke(value, config: RunnableConfig):
+        validate_prompt(value, config)
         try:
-            return await model.ainvoke(value, config=config)
+            return completed_result(await model.ainvoke(value, config=config))
         except (OutputParserException, ValidationError) as exc:
+            _log_structured_failure(schema, exc)
             raise StructuredOutputError("The model returned an invalid structured result") from exc
         except Exception as exc:
             raise ProviderExecutionError("The configured model request failed") from exc
@@ -276,16 +409,19 @@ def build_question_review_chain(llm) -> Runnable:
 def build_question_revision_chain(llm) -> Runnable:
     revise = RunnableBranch(
         (lambda value: value["question_type"] == "T/F",
-         QuestionRewriterPrompt | _model_boundary(llm, TrueFalseRevisionResult)),
-        QuestionRewriterPrompt | _model_boundary(llm, MCQRevisionResult),
+         _fit_optional_history(QuestionRewriterPrompt, TrueFalseRevisionResult) | QuestionRewriterPrompt | _model_boundary(llm, TrueFalseRevisionResult)),
+        _fit_optional_history(QuestionRewriterPrompt, MCQRevisionResult) | QuestionRewriterPrompt | _model_boundary(llm, MCQRevisionResult),
     )
     return (RunnableLambda(_revision_inputs)
             | RunnablePassthrough.assign(_result=revise)
             | RunnableLambda(_revision_result)).with_types(input_type=RevisionInput, output_type=RevisionResult)
 
 
-def _text_chain(llm, prepare, prompt, input_type):
-    return (RunnableLambda(prepare) | prompt | _model_boundary(llm) | RunnableLambda(text_output)).with_types(
+def _text_chain(llm, prepare, prompt, input_type, *, optional_history=None):
+    prepared = RunnableLambda(prepare)
+    if optional_history is not None:
+        prepared = prepared | _fit_optional_history(prompt, field=optional_history)
+    return (prepared | prompt | _model_boundary(llm) | RunnableLambda(text_output)).with_types(
         input_type=input_type, output_type=str)
 
 
@@ -298,7 +434,8 @@ def build_summary_chain(llm) -> Runnable:
 
 
 def build_summary_revision_chain(llm) -> Runnable:
-    return _text_chain(llm, _summary_revision_inputs, SummarizerRewriterPrompt, SummaryRevisionInput)
+    return _text_chain(llm, _summary_revision_inputs, SummarizerRewriterPrompt, SummaryRevisionInput,
+                       optional_history="user_feedback")
 
 
 def build_summary_structure_chain(llm) -> Runnable:

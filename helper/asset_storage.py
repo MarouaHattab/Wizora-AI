@@ -18,11 +18,13 @@ SOURCE_METADATA_KEYS = (
     "document_subject", "document_created", "document_modified", "document_keywords", "document_category",
     "document_language", "document_creator", "document_producer", "document_creationDate", "document_modDate",
     "scanned", "ocr", "scanned_page_count", "empty_page_count", "timestamp_precision",
+    "encoding", "line_start", "line_end", "frame_index", "frame_reference", "vision_model", "vision_provider",
 )
 _BOOLEAN_METADATA = {"scanned", "ocr"}
 _INTEGER_METADATA = {
     "page", "page_count", "paragraph", "heading_level", "table_index", "table_count", "image_count",
     "scanned_page_count", "empty_page_count",
+    "line_start", "line_end", "frame_index",
 }
 _TIMESTAMP_METADATA = {"start", "end"}
 
@@ -89,13 +91,32 @@ def validate_source_metadata(metadata, source_type=None):
     start, end = metadata.get("start"), metadata.get("end")
     if (start is None) != (end is None) or (start is not None and end < start):
         raise InvalidDocumentError("Invalid transcription timestamps")
-    if source_type in {"audio", "video"} and metadata.get("content_type") not in {None, "transcript"}:
-        raise InvalidDocumentError("Audio and video evidence must contain transcribed speech")
+    allowed_content = {None, "transcript", "visual_description"} if source_type == "video" else {None, "transcript"}
+    if source_type in {"audio", "video"} and metadata.get("content_type") not in allowed_content:
+        raise InvalidDocumentError("Invalid media evidence content type")
+    visual_fields = {"frame_index", "frame_reference", "vision_model", "vision_provider"}
+    visual = metadata.get("content_type") == "visual_description"
+    if visual and (source_type != "video" or not visual_fields.issubset(metadata)
+                   or metadata.get("timestamp_precision") != "frame" or start is None):
+        raise InvalidDocumentError("Visual observations require complete frame and model provenance")
+    if not visual and visual_fields.intersection(metadata):
+        raise InvalidDocumentError("Only visual observations may contain frame and vision metadata")
     precision = metadata.get("timestamp_precision")
     if precision is not None and (
-        precision not in {"segment", "audio_window"} or start is None or source_type not in {"audio", "video"}
+        precision not in {"segment", "audio_window", "frame"} or start is None or source_type not in {"audio", "video"}
     ):
         raise InvalidDocumentError("Invalid transcription timestamp precision")
+    if precision == "frame" and (source_type != "video" or metadata.get("content_type") != "visual_description" or start != end):
+        raise InvalidDocumentError("Frame observations require a single video timestamp")
+    if metadata.get("line_end", 1) < metadata.get("line_start", 1):
+        raise InvalidDocumentError("Invalid text line range")
+    reference = metadata.get("frame_reference")
+    if reference is not None:
+        path = PurePosixPath(reference)
+        if (source_type != "video" or path.is_absolute() or len(path.parts) != 2
+                or path.parts[0] != "frames" or any(part in {"", ".", ".."} for part in reference.split("/"))
+                or "\\" in reference or ":" in reference or any(ord(char) < 32 for char in reference)):
+            raise InvalidDocumentError("Frame references must stay inside the asset")
     for key in ("section_path", "image_references"):
         if key not in metadata:
             continue

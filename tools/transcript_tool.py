@@ -1,5 +1,6 @@
 from collections.abc import Mapping, Sequence
 import math
+import time
 from numbers import Real
 from pathlib import Path
 from threading import BoundedSemaphore, Lock
@@ -19,16 +20,28 @@ from helper.ingestion_errors import (
 
 _WHISPER_MODEL = "tiny"
 _model = None
+_model_config = None
 _model_lock = Lock()
 _inference_slots = BoundedSemaphore(1)
 
 
-def _get_model() -> Any:
-    global _model
+def _setting(settings, name, default=None):
+    return settings.get(name, default) if isinstance(settings, Mapping) else getattr(settings, name, default)
+
+
+def _get_model(settings=None) -> Any:
+    global _model, _model_config
+    name = _setting(settings, "WHISPER_MODEL", _WHISPER_MODEL)
+    device = _setting(settings, "WHISPER_DEVICE", "cpu")
+    if device == "auto":
+        import torch
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+    configuration = (name, device)
     with _model_lock:
-        if _model is None:
+        if _model is None or _model_config != configuration:
             try:
-                _model = whisper.load_model(_WHISPER_MODEL)
+                _model = whisper.load_model(name, device=device)
+                _model_config = configuration
             except Exception as exc:
                 raise ModelInitializationError(
                     "The transcription model could not be initialized."
@@ -36,7 +49,8 @@ def _get_model() -> Any:
         return _model
 
 
-def _transcribe(media_path: str, *, audio_samples: np.ndarray | None = None) -> Mapping[str, Any]:
+def _transcribe(media_path: str, *, audio_samples: np.ndarray | None = None,
+                settings=None, deadline: float | None = None) -> Mapping[str, Any]:
     path = Path(media_path)
     if not path.is_file():
         raise AssetNotFoundError("The media file was not found.")
@@ -50,12 +64,22 @@ def _transcribe(media_path: str, *, audio_samples: np.ndarray | None = None) -> 
         or not np.isfinite(audio_samples).all()
     ):
         raise TranscriptionError("The normalized transcription audio is invalid.")
-    model = _get_model()
+    model = _get_model(settings)
+    acquired = _inference_slots.acquire(timeout=max(0, deadline - time.monotonic())) if deadline is not None else _inference_slots.acquire()
+    if not acquired:
+        raise TranscriptionError("The transcription deadline was exceeded while waiting for the model.")
     try:
-        with _inference_slots:
-            result = model.transcribe(audio_samples if audio_samples is not None else str(media_path))
+        options = {"task": "transcribe", "temperature": 0.0, "condition_on_previous_text": False,
+                   "no_speech_threshold": float(_setting(settings, "WHISPER_NO_SPEECH_THRESHOLD", 0.6)),
+                   "fp16": str(getattr(model, "device", "cpu")).startswith("cuda")}
+        language = _setting(settings, "WHISPER_LANGUAGE")
+        if language:
+            options["language"] = language
+        result = model.transcribe(audio_samples if audio_samples is not None else str(media_path), **options)
     except Exception as exc:
         raise TranscriptionError("The media could not be transcribed.") from exc
+    finally:
+        _inference_slots.release()
     if not isinstance(result, Mapping):
         raise TranscriptionError("The transcription result is invalid.")
     return result
@@ -117,6 +141,7 @@ def _documents_from_result(
             "record_index": len(documents),
             "start": float(start),
             "end": float(end),
+            "timestamp_precision": "segment",
         }
         segment_id = segment.get("id")
         if isinstance(segment_id, (str, int)) and not isinstance(segment_id, bool):
@@ -150,11 +175,13 @@ def transcribe_documents(
     source_type: str = "audio",
     *,
     audio_samples: np.ndarray | None = None,
+    settings=None,
+    deadline: float | None = None,
 ) -> list[Document]:
     """Transcribe media into source records without discarding segment timing."""
     if source_type not in {"audio", "video"}:
         raise TranscriptionError("The media source type must be audio or video.")
-    result = _transcribe(media_path, audio_samples=audio_samples)
+    result = _transcribe(media_path, audio_samples=audio_samples, settings=settings, deadline=deadline)
     return _documents_from_result(result, media_path, asset_id, source_name, source_type)
 
 

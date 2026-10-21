@@ -40,6 +40,9 @@ def summary_feedback(snapshot):
         "summary": snapshot.values.get("summary", ""),
         "message": "Provide feedback or type 'save' to finish",
         "waiting_for_input": True,
+        "source_scope": snapshot.values.get("source_scope", ""),
+        "context_note": snapshot.values.get("context_note", ""),
+        "source_citations": snapshot.values.get("source_citations", []),
     }
     if snapshot.values.get("review_notice"):
         payload["revision_notice"] = snapshot.values["review_notice"]
@@ -89,6 +92,8 @@ async def stream_session(
                     },
                 )
             elif event_type == "on_chat_model_stream":
+                if event.get("metadata", {}).get("content_map_private"):
+                    continue
                 node = event.get("metadata", {}).get("langgraph_node")
                 if node not in token_nodes:
                     continue

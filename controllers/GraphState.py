@@ -1,4 +1,5 @@
-from typing import Annotated, Literal, NotRequired, TypedDict
+from typing import Annotated, Literal
+from typing_extensions import TypedDict
 
 from langchain_core.documents import Document
 from langchain_core.messages import AnyMessage, BaseMessage
@@ -20,11 +21,11 @@ class RevisionRecord(TypedDict):
     draft_preview: str
 
 
-class RevisionRequirement(TypedDict):
+class RevisionRequirement(TypedDict, total=False):
     review_id: str
     feedback: str
-    feedback_hash: NotRequired[str]
-    truncated: NotRequired[bool]
+    feedback_hash: str
+    truncated: bool
 
 
 class ReviewState(TypedDict, total=False):
@@ -42,6 +43,10 @@ class ReviewState(TypedDict, total=False):
     revision_limit_reached: bool
     review_notice: str | None
     revision_kind: Literal["wording", "structural", "unsupported"] | None
+    source_chunks: list[dict]
+    source_citations: list[dict]
+    source_scope: str
+    context_note: str
 
 
 class QuestionGenState(ReviewState):
@@ -51,36 +56,42 @@ class QuestionGenState(ReviewState):
     options: list[str] | None
     answer: str
     explanation: str
+    source_context: str
+    previous_questions: list[str]
 
 
 class SummaryGenState(ReviewState):
     context: str
     summary: str
     Main_Points: str
-    old_summary: NotRequired[str]
+    source_outlines: list[str]
+    summary_sections: list[str]
 
 
-class QuestionAnswerState(TypedDict):
+class QuestionAnswerRequiredState(TypedDict):
     asset_id: str
     messages: Annotated[list[AnyMessage], merge_messages]
     relevant_text: list[Document]
     on_topic: Literal["Yes", "No", ""]
     context: str
-    history_trimmed: NotRequired[int]
-    state_version: NotRequired[Literal[4]]
-    conversation_history: NotRequired[list[BaseMessage]]
-    original_question: NotRequired[str]
-    retrieval_query: NotRequired[str]
-    index_version: NotRequired[str]
-    retrieval_pass: NotRequired[int]
-    retrieved_ids: NotRequired[list[str]]
-    retrieval_scores: NotRequired[dict[str, float]]
-    evidence_changed: NotRequired[bool]
-    retrieval_issue: NotRequired[str | None]
-    evidence_decision: NotRequired[EvidenceDecision | None]
-    answer_draft: NotRequired[GroundedAnswer | None]
-    grounding_assessment: NotRequired[GroundingAssessment | None]
-    answer_status: NotRequired[Literal["supported", "partial", "insufficient", "off_topic"]]
-    answer_citations: NotRequired[list[dict]]
-    grounding_status: NotRequired[Literal["model_assessed", "not_applicable", "rejected"]]
-    rag_diagnostics: NotRequired[dict]
+
+
+class QuestionAnswerState(QuestionAnswerRequiredState, total=False):
+    history_trimmed: int
+    state_version: Literal[4]
+    conversation_history: list[BaseMessage]
+    original_question: str
+    retrieval_query: str
+    index_version: str
+    retrieval_pass: int
+    retrieved_ids: list[str]
+    retrieval_scores: dict[str, float]
+    evidence_changed: bool
+    retrieval_issue: str | None
+    evidence_decision: EvidenceDecision | None
+    answer_draft: GroundedAnswer | None
+    grounding_assessment: GroundingAssessment | None
+    answer_status: Literal["supported", "partial", "insufficient", "off_topic"]
+    answer_citations: list[dict]
+    grounding_status: Literal["model_assessed", "not_applicable", "rejected"]
+    rag_diagnostics: dict

@@ -62,6 +62,19 @@ revision_examples = [
             "reason": "The requested False answer contradicts the source's six-week duration.",
         },
     },
+    {
+        "question_type": "T/F",
+        "action": "revise",
+        "context": "The trial lasted six weeks and enrolled 24 adults.",
+        "current_question": _example_question.copy(),
+        "feedback": "Make the statement concise and clear, preserving the answer.",
+        "history": [],
+        "result": {
+            "status": "unchanged",
+            "question": _example_question.copy(),
+            "reason": "The statement is already concise and clear; no supported wording change is needed.",
+        },
+    },
 ]
 
 _human_template = """REQUESTED_TYPE: {question_type}
@@ -123,7 +136,10 @@ Choose status after comparing your final question object with CURRENT_QUESTION.
 If you changed any question, options, answer, or explanation text, status MUST be
 revised and reason MUST be null. unchanged means every field is identical, including
 the explanation; never return an improved question under unchanged. Supported clarity
-or concision feedback should produce a revised result when an improvement is possible.""",
+or concision feedback should produce a revised result when an improvement is possible.
+Check the status/reason pair before returning: revised requires reason null; unchanged
+requires a nonblank reason string even when the draft is already concise. Never return
+unchanged with reason null. Explain an already-satisfied request briefly in reason.""",
         ),
         few_shot_prompt,
         ("human", _human_template),

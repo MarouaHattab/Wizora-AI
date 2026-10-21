@@ -2,6 +2,7 @@ import asyncio
 import sqlite3
 import time
 import uuid
+import anyio
 from fastapi import APIRouter, HTTPException
 from typing import Literal
 from langgraph.types import Command
@@ -55,6 +56,9 @@ def question_response(thread_id, snapshot):
             "answer": current_graph_state.get("answer"),
             "explanation": current_graph_state.get("explanation"),
             "message": REVIEW_MESSAGE,
+            "source_scope": current_graph_state.get("source_scope", ""),
+            "context_note": current_graph_state.get("context_note", ""),
+            "source_citations": current_graph_state.get("source_citations", []),
         },
         "current_state": current_graph_state,
     }
@@ -177,8 +181,20 @@ async def start_question_generation_session(
     thread_id = str(uuid.uuid4())
     context = await read_asset_text(request.asset_id, for_question=True)
 
+    from helper.session_store import completed_sessions
+    graph = _question_graph()
+    saved = await anyio.to_thread.run_sync(completed_sessions, "question_generation", request.asset_id)
+    previous_questions = []
+    for item in saved:
+        snapshot = await graph.aget_state({"configurable": {"thread_id": item["thread_id"]}})
+        if session_status(snapshot) == "completed" and snapshot.values.get("asset_id") == request.asset_id:
+            question = snapshot.values.get("question")
+            if isinstance(question, str) and question.strip():
+                previous_questions.append(question)
+
     initial_state = QuestionGenState(
         asset_id=request.asset_id, context=context, question_type=request.question_type,
+        previous_questions=previous_questions,
         question="", options=None, answer="", explanation="", history=[],
         feedback="", human_feedback_text="", critic_feedback=None,
         feedback_review_id=None, revision_requirements=[], state_version=4,

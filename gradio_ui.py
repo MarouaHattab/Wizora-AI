@@ -1,5 +1,6 @@
 from copy import deepcopy
 from pathlib import Path
+import math
 import re
 
 import gradio as gr
@@ -7,22 +8,37 @@ import gradio as gr
 from helper.frontend_client import BackendClient, BackendError, get_frontend_settings
 
 
-SUPPORTED_EXTENSIONS = [".pdf", ".docx", ".mp3", ".wav", ".m4a", ".mp4", ".mov", ".mkv", ".webm"]
+SUPPORTED_EXTENSIONS = [".txt", ".pdf", ".docx", ".mp3", ".wav", ".m4a", ".flac", ".ogg", ".aac",
+                        ".mp4", ".mov", ".mkv", ".webm", ".avi", ".flv"]
 CUSTOM_CSS = """
-/* Keep the interface light and task-focused, with the Wizora-AI visual language. */
+/* Preserve Wizora-AI's full-width purple workflow in both color modes. */
 body { background: #f8fafc !important; }
+body.dark { background: #0f1423 !important; }
 .gradio-container { width: 100% !important; max-width: none !important; margin: 0 !important;
-    padding: 28px 32px 44px !important; background: #f8fafc !important;
-    color: #1f2937 !important; color-scheme: light; }
+    --wiz-page: #f8fafc; --wiz-surface: #ffffff; --wiz-text: #1f2937; --wiz-muted: #4b5563;
+    --wiz-border: #e5e7eb; --wiz-heading: #312e81; --wiz-subheading: #6b21a8; --wiz-link: #4338ca;
+    --wiz-accent-surface: #eef2ff; --wiz-accent-text: #312e81; --wiz-accent-border: #c7d2fe;
+    --wiz-success-bg: #f0fdf4; --wiz-success-text: #166534; --wiz-success-border: #86efac;
+    --wiz-error-bg: #fef2f2; --wiz-error-text: #991b1b; --wiz-error-border: #fca5a5;
+    padding: clamp(16px, 2.2vw, 28px) clamp(10px, 2.55vw, 32px) clamp(28px, 3.5vw, 44px) !important;
+    background: var(--wiz-page) !important;
+    color: var(--wiz-text) !important; color-scheme: light; }
+.dark .gradio-container, .gradio-container.dark {
+    --wiz-page: #0f1423; --wiz-surface: #191f31; --wiz-text: #e5e7eb; --wiz-muted: #b9c3d5;
+    --wiz-border: #3d455d; --wiz-heading: #ddd6fe; --wiz-subheading: #d8b4fe; --wiz-link: #c4b5fd;
+    --wiz-accent-surface: #25213f; --wiz-accent-text: #ddd6fe; --wiz-accent-border: #65588c;
+    --wiz-success-bg: #14322a; --wiz-success-text: #bbf7d0; --wiz-success-border: #34755b;
+    --wiz-error-bg: #3c202a; --wiz-error-text: #fecaca; --wiz-error-border: #99535e;
+    color-scheme: dark; }
 .header { text-align: center; margin: 0 auto 22px !important; padding: 8px 16px 18px !important;
     background: transparent; }
-.header h1 { margin-bottom: 4px !important; color: #312e81; letter-spacing: -.02em; }
-.header h3 { color: #6b21a8; font-weight: 600; }
-.gradio-container textarea, .gradio-container input { color: #1f2937 !important;
-    background: #ffffff !important; }
-.gradio-container label span { color: #374151 !important; font-weight: 600; }
+.header h1 { margin-bottom: 4px !important; color: var(--wiz-heading); letter-spacing: -.02em; }
+.header h3 { color: var(--wiz-subheading); font-weight: 600; }
+.gradio-container textarea, .gradio-container input { color: var(--wiz-text) !important;
+    background: var(--wiz-surface) !important; }
+.gradio-container label span { color: var(--wiz-text) !important; font-weight: 600; }
 .gradio-container #workflow-tabs { overflow: hidden; border-radius: 18px;
-    background: #ffffff; box-shadow: 0 8px 28px rgba(76, 29, 149, .10); }
+    background: var(--wiz-surface); box-shadow: 0 8px 28px rgba(76, 29, 149, .10); }
 .gradio-container #workflow-tabs .tab-wrapper { height: auto; min-height: 56px; padding: 0; }
 .gradio-container #workflow-tabs .tab-container { display: grid;
     grid-template-columns: repeat(4, minmax(0, 1fr)); align-items: stretch;
@@ -44,15 +60,15 @@ body { background: #f8fafc !important; }
 .gradio-container #workflow-tabs [role="tab"][aria-selected="true"]::after {
     background: #ffffff !important; }
 .workflow-panel { padding: 24px 24px 28px !important; }
-.workflow-description { margin: 0 0 18px !important; color: #4b5563; }
+.workflow-description { margin: 0 0 18px !important; color: var(--wiz-muted); }
 .workflow-row { gap: 22px !important; align-items: start; }
 .workflow-card { padding: 18px !important; border-radius: 16px;
-    border: 1px solid #e5e7eb; background: #ffffff; }
-.workflow-results { background: #ffffff; }
+    border: 1px solid var(--wiz-border); background: var(--wiz-surface); min-width: 0; }
+.workflow-results { background: var(--wiz-surface); }
 .upload-area { border: 2px dashed #e0e7ff !important; border-radius: 16px !important;
-    background: #ffffff !important; transition: border-color .2s ease, background .2s ease !important; }
+    background: var(--wiz-surface) !important; transition: border-color .2s ease, background .2s ease !important; }
 .upload-area:hover, .upload-area:focus-within { border-color: #4f46e5 !important;
-    background: #eef2ff !important; }
+    background: var(--wiz-accent-surface) !important; }
 .button-primary { background: linear-gradient(90deg, #4f46e5 0%, #7c3aed 100%) !important;
     border: none !important; color: #ffffff !important; border-radius: 11px !important;
     padding: 11px 20px !important; font-weight: 700 !important;
@@ -64,17 +80,19 @@ body { background: #f8fafc !important; }
     outline-offset: 2px; }
 .extracted-text textarea, .workflow-results textarea { line-height: 1.55 !important; }
 .extracted-text textarea { font-family: "Courier New", Courier, monospace !important;
-    background: #f8fafc !important; max-height: 600px !important; overflow-y: auto !important; }
-.status { border: 1px solid #c7d2fe; background: #eef2ff; color: #312e81;
+    background: var(--wiz-page) !important; max-height: 600px !important; overflow-y: auto !important; }
+.status { border: 1px solid var(--wiz-accent-border); background: var(--wiz-accent-surface); color: var(--wiz-accent-text);
     border-radius: 11px; padding: 12px 14px; margin-top: 16px; }
-.status-success { border-color: #86efac; background: #f0fdf4; color: #166534; }
-.status-error { border-color: #fca5a5; background: #fef2f2; color: #991b1b; }
-.chat-container { max-height: 500px !important; overflow-y: auto !important; background: #ffffff !important;
-    border: 1px solid #e5e7eb !important; border-radius: 14px !important; }
+.status-success { border-color: var(--wiz-success-border); background: var(--wiz-success-bg); color: var(--wiz-success-text); }
+.status-error { border-color: var(--wiz-error-border); background: var(--wiz-error-bg); color: var(--wiz-error-text); }
+.chat-container { max-height: 500px !important; overflow-y: auto !important; background: var(--wiz-surface) !important;
+    border: 1px solid var(--wiz-border) !important; border-radius: 14px !important; }
+.asset-details, .source-preview { overflow-wrap: anywhere; color: var(--wiz-text); }
+.source-preview { max-height: 440px; overflow-y: auto; }
+.source-preview a { color: var(--wiz-link) !important; }
 @media (max-width: 720px) {
-    .gradio-container { padding: 16px 10px 28px !important; }
     .header { padding: 18px 14px !important; border-radius: 16px; }
-    .gradio-container #workflow-tabs .tab-container { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    #workflow-tabs .tab-container { grid-template-columns: repeat(2, minmax(0, 1fr)); }
     .workflow-panel { padding: 18px 12px 22px !important; }
     .workflow-row { gap: 12px !important; }
     .workflow-card { padding: 13px !important; }
@@ -88,7 +106,7 @@ body { background: #f8fafc !important; }
 
 def empty_state():
     return {
-        "asset_id": "", "asset": {}, "extracted_text": "",
+        "asset_id": "", "asset": {}, "extracted_text": "", "asset_details": "", "source_preview": "",
         "question": {}, "summary": {}, "qa": {},
         "upload_status": "📋 Ready to upload a file",
         "question_status": "📋 Generate a question first to enable revision and Accept / Save.",
@@ -101,13 +119,90 @@ def markdown_text(value):
     return re.sub(r"([\\`*_{}\[\]()<>#!|])", r"\\\1", str(value))
 
 
+def timestamp_text(value):
+    if not isinstance(value, (int, float)) or isinstance(value, bool) or not math.isfinite(value) or value < 0:
+        return ""
+    minutes, seconds = divmod(int(value), 60)
+    hours, minutes = divmod(minutes, 60)
+    return f"{hours}:{minutes:02d}:{seconds:02d}" if hours else f"{minutes}:{seconds:02d}"
+
+
+def asset_details(asset):
+    rows = []
+    if asset.get("source_name"):
+        rows.append("**File:** " + markdown_text(asset["source_name"]))
+    facts = []
+    if asset.get("source_type"):
+        facts.append(str(asset["source_type"]).upper())
+    size = asset.get("size_bytes")
+    if isinstance(size, (int, float)) and not isinstance(size, bool) and math.isfinite(size) and size >= 0:
+        facts.append(f"{size / 1024 ** 2:.1f} MB" if size >= 1024 ** 2 else f"{size / 1024:.1f} KB")
+    duration = timestamp_text(asset.get("duration_seconds"))
+    if duration:
+        facts.append("Duration " + duration)
+    if asset.get("record_count") is not None:
+        facts.append(f"{asset['record_count']} content records")
+    if asset.get("frame_count") is not None:
+        facts.append(f"{asset['frame_count']} analyzed frames")
+    if asset.get("pages"):
+        pages = asset["pages"]
+        facts.append("Pages " + (", ".join(str(page) for page in pages) if isinstance(pages, list) else str(pages)))
+    languages = asset.get("languages") or asset.get("language")
+    if languages:
+        facts.append("Language " + (", ".join(str(item) for item in languages) if isinstance(languages, list) else str(languages)))
+    if facts:
+        rows.append(markdown_text(" · ".join(facts)))
+    scope = asset.get("processing_scope")
+    scopes = {"audio_visual": "Audio transcript and visual analysis", "visual_only": "Visual analysis only",
+              "transcript_only": "Transcript only", "text_only": "Text extraction"}
+    if scope:
+        rows.append("**Processing scope:** " + markdown_text(scopes.get(scope, scope)))
+    for field, label in (("audio_status", "Audio"), ("visual_status", "Visual analysis")):
+        if asset.get(field):
+            rows.append(f"**{label}:** " + markdown_text(str(asset[field]).replace("_", " ")))
+    warnings = asset.get("warnings") or []
+    if isinstance(warnings, str):
+        warnings = [warnings]
+    if asset.get("source_type") == "video" and scope == "transcript_only":
+        warnings = ["Only spoken audio is available. Slides, on-screen text and visual actions were not analyzed.", *warnings]
+    if warnings:
+        rows.append("**Processing warnings**\n\n" + "\n".join("- " + markdown_text(item) for item in warnings))
+    files = asset.get("files") or []
+    if files:
+        rows.append("**Available files:** " + ", ".join(markdown_text(item) for item in files))
+    return "\n\n".join(rows)
+
+
+def upload_progress(job):
+    labels = {"received": "File received", "processing": "Processing file", "inspecting_media": "Inspecting media",
+              "extracting_audio": "Extracting audio", "transcribing": "Transcribing audio",
+              "extracting_frames": "Extracting video frames", "analyzing_frames": "Analyzing video visuals",
+              "analyzing_visuals": "Analyzing video visuals", "visual_analysis": "Analyzing video visuals",
+              "pdf_extracted": "PDF text extracted", "docx_extracted": "DOCX text extracted",
+              "text_extracted": "Text extracted", "records_validated": "Content records validated",
+              "indexing": "Building source index", "ready": "Ready"}
+    rows = []
+    for stage in (job.get("stages") or [])[-8:]:
+        if not isinstance(stage, dict):
+            continue
+        name = str(stage.get("name", "processing"))
+        label = labels.get(name, name.replace("_", " ").capitalize())
+        if stage.get("segment") is not None:
+            label += f" · segment {stage['segment']}" + (f" of {stage['segments']}" if stage.get("segments") else "")
+        if stage.get("status") == "completed":
+            label += " · complete"
+        rows.append("- " + markdown_text(label))
+    title = "🔄 File queued for processing…" if job.get("status") == "queued" else "🔄 Processing your file…"
+    return title + ("\n\n" + "\n".join(rows) if rows else "")
+
+
 def create_theme():
-    theme = gr.themes.Soft(primary_hue="purple")
-    tokens = theme.to_dict()["theme"]
-    paired = {key: tokens[key.removesuffix("_dark")] for key in tokens
-              if key.endswith("_dark") and key.removesuffix("_dark") in tokens}
-    paired.update(background_fill_primary="#f8fafc", background_fill_primary_dark="#f8fafc")
-    return theme.set(**paired)
+    return gr.themes.Soft(primary_hue="purple").set(
+        background_fill_primary="#f8fafc", background_fill_primary_dark="#0f1423",
+        background_fill_secondary="#ffffff", background_fill_secondary_dark="#191f31",
+        body_text_color="#1f2937", body_text_color_dark="#e5e7eb",
+        block_background_fill="#ffffff", block_background_fill_dark="#191f31",
+    )
 
 
 class GradioUI:
@@ -160,6 +255,7 @@ class GradioUI:
             "" if clear_inputs or clear_message else gr.skip(),
             *[gr.update(interactive=question_ready) for _ in range(3)],
             *[gr.update(interactive=summary_ready) for _ in range(2)],
+            state.get("asset_details", ""), state.get("source_preview", ""),
         )
 
     def select_asset(self, asset_id, value):
@@ -183,7 +279,62 @@ class GradioUI:
         if asset.get("id") != selected or asset.get("status") != "ready":
             raise BackendError("The selected file is not ready. Upload it again or wait for processing", 409)
         state["asset"] = asset
+        state["asset_details"] = asset_details(asset)
         return selected
+
+    async def _load_content(self, asset_id, state):
+        extracted = await self.client.extracted_text(asset_id)
+        text = extracted.get("extracted_text", "")
+        if not isinstance(text, str) or not text.strip():
+            raise BackendError("The file was stored but no extracted content was returned", 502)
+        state["extracted_text"] = text
+        state["source_preview"] = ""
+        state.pop("content_warning", None)
+        if not hasattr(self.client, "get_content"):
+            return
+        try:
+            content = await self.client.get_content(asset_id)
+        except BackendError as error:
+            if error.status_code in {404, 405}:
+                return  # Older backends expose the combined text only.
+            state["content_warning"] = "Source metadata could not be loaded. " + markdown_text(error.detail)
+            state["source_preview"] = state["content_warning"]
+            return
+        documents = content.get("documents")
+        if content.get("asset_id", asset_id) != asset_id or not isinstance(documents, list):
+            raise BackendError("The backend returned invalid source records", 502)
+        original = next((item for item in state["asset"].get("files", [])
+                         if isinstance(item, str) and item.startswith("original.")), None)
+        rows = []
+        for index, document in enumerate(documents[:8], 1):
+            if not isinstance(document, dict) or not isinstance(document.get("metadata"), dict):
+                continue
+            metadata = document["metadata"]
+            labels = [str(metadata.get("content_type") or "Text").replace("_", " ").capitalize()]
+            for key, label in (("page", "Page"), ("section", "Section"), ("paragraph", "Paragraph")):
+                if metadata.get(key) is not None:
+                    labels.append(f"{label} {metadata[key]}")
+            start = metadata.get("start", metadata.get("timestamp"))
+            at = timestamp_text(start)
+            if at:
+                end = timestamp_text(metadata.get("end"))
+                labels.append(at + ("–" + end if end else ""))
+            if metadata.get("timestamp_precision") == "audio_window":
+                labels.append("audio window; approximate timing")
+            if metadata.get("language"):
+                labels.append(str(metadata["language"]))
+            title = markdown_text(" · ".join(labels))
+            if original:
+                try:
+                    url = self.client.source_url(asset_id, original, page=metadata.get("page"), timestamp=start if at else None)
+                    title = f"[{title}]({url})"
+                except BackendError:
+                    pass
+            excerpt = str(document.get("page_content", "")).strip()
+            rows.append(f"**{index}. {title}**\n\n" + markdown_text(excerpt[:700]) + ("…" if len(excerpt) > 700 else ""))
+        if len(documents) > 8:
+            rows.append(f"Showing 8 of {len(documents)} source records. The combined content above includes all records.")
+        state["source_preview"] = "\n\n---\n\n".join(rows)
 
     async def upload_file(self, file, value):
         state = self._state(value)
@@ -192,21 +343,29 @@ class GradioUI:
                 raise BackendError("Please select a file to upload", 422)
             path = Path(file if isinstance(file, str) else file.name)
             if path.suffix.lower() not in SUPPORTED_EXTENSIONS:
-                raise BackendError("Unsupported file format. Choose PDF, DOCX, MP3, WAV, M4A, MP4, MOV, MKV, or WEBM", 415)
-            state["upload_status"] = "🔄 Uploading and extracting text or transcript…"
-            yield self.render(state)
-            result = await self.client.upload(path)
+                raise BackendError("Unsupported file format. Choose TXT, PDF, DOCX, audio or video from the supported formats listed above", 415)
+            state = empty_state()
+            state["upload_status"] = "🔄 Uploading " + markdown_text(path.name) + "…"
+            yield self.render(state, clear_inputs=True)
+            if hasattr(self.client, "upload_events"):
+                async for result in self.client.upload_events(path):
+                    asset_id = result.get("id")
+                    if not isinstance(asset_id, str) or not asset_id:
+                        raise BackendError("The backend did not return a valid Asset ID", 502)
+                    state.update(asset_id=asset_id, asset=result, asset_details=asset_details(result),
+                                 upload_status=upload_progress(result))
+                    yield self.render(state)
+            else:
+                result = await self.client.upload(path)
             asset_id = result.get("id")
             if not isinstance(asset_id, str) or not asset_id:
                 raise BackendError("The backend did not return a valid Asset ID", 502)
-            state = empty_state()
             state["asset_id"] = asset_id
             await self._ready(asset_id, state)
-            extracted = await self.client.extracted_text(asset_id)
-            state["extracted_text"] = extracted.get("extracted_text", "")
-            if not state["extracted_text"].strip():
-                raise BackendError("The file was stored but no extracted text was returned", 502)
-            state["upload_status"] = f"✅ File uploaded successfully!\n\n📁 Asset ID: `{asset_id}`\n\n📄 File: {markdown_text(path.name)}"
+            await self._load_content(asset_id, state)
+            state["upload_status"] = f"✅ File processed successfully. Ready for questions, summaries and Q&A.\n\nAsset ID: `{asset_id}`"
+            if state.get("content_warning"):
+                state["upload_status"] += "\n\n" + state["content_warning"]
         except BackendError as error:
             state["upload_status"] = "❌ " + error.detail
         except Exception:
@@ -217,9 +376,10 @@ class GradioUI:
         state = self._state(value)
         try:
             selected = await self._ready(asset_id, state)
-            result = await self.client.extracted_text(selected)
-            state["extracted_text"] = result.get("extracted_text", "")
-            state["upload_status"] = "✅ Extracted text loaded. This Asset ID is selected in all four tabs."
+            await self._load_content(selected, state)
+            state["upload_status"] = "✅ Extracted content loaded. This Asset ID is selected in all four tabs."
+            if state.get("content_warning"):
+                state["upload_status"] += "\n\n" + state["content_warning"]
         except BackendError as error:
             state["extracted_text"] = ""
             state["upload_status"] = "❌ " + error.detail
@@ -420,7 +580,7 @@ class GradioUI:
             if citation.get("start") is not None:
                 places.append(f"{citation['start']:g}s" if isinstance(citation["start"], (int, float)) else str(citation["start"]))
             if citation.get("source_type") == "video":
-                places.append("Video transcript")
+                places.append("Video visual" if citation.get("content_type") == "visual_description" else "Video transcript")
             title = markdown_text(label)
             if original:
                 try:
@@ -530,7 +690,9 @@ def create_gradio_interface(client=None):
             gr.Markdown("# 🎓 Wizora-AI\n### AI Teaching Assistant\nUpload content, generate questions, create summaries and chat with your materials.", elem_classes="header")
             with gr.Tabs(elem_id="workflow-tabs"):
                 with gr.Tab("📁 Upload Content", elem_id="upload-tab", elem_classes="workflow-panel"):
-                    gr.Markdown("### Upload a PDF, DOCX, audio or video file for processing", elem_classes="workflow-description")
+                    gr.Markdown("### Upload text, documents, audio or video for processing\n"
+                                "TXT · PDF · DOCX · MP3 · WAV · M4A · FLAC · OGG · AAC · MP4 · MOV · MKV · WEBM · AVI · FLV",
+                                elem_classes="workflow-description")
                     with gr.Row(elem_classes="workflow-row"):
                         with gr.Column(scale=1, elem_classes=["workflow-card", "workflow-controls"]):
                             file_input = gr.File(label="Select File", file_count="single", type="filepath", file_types=SUPPORTED_EXTENSIONS, elem_classes="upload-area")
@@ -538,8 +700,11 @@ def create_gradio_interface(client=None):
                             asset_id = gr.Textbox(label="Generated Asset ID", placeholder="Asset ID will appear here after upload…")
                             load_btn = gr.Button("📄 Load Extracted Text")
                             upload_status = gr.Markdown(empty_state()["upload_status"], elem_classes="status")
+                            details = gr.Markdown("", elem_classes="asset-details")
                         with gr.Column(scale=2, elem_classes=["workflow-card", "workflow-results"]):
-                            extracted = gr.Textbox(label="Extracted Text", placeholder="Extracted text or transcript will appear here after upload…", lines=15, max_lines=20, interactive=False, buttons=["copy"], elem_classes="extracted-text")
+                            extracted = gr.Textbox(label="Extracted Content", placeholder="Extracted text, transcript and available visual descriptions will appear here after processing…", lines=15, max_lines=20, interactive=False, buttons=["copy"], elem_classes="extracted-text")
+                            with gr.Accordion("Source records and timestamps", open=False):
+                                preview = gr.Markdown("", elem_classes="source-preview")
                 with gr.Tab("❓ Question Generation", elem_id="question-tab", elem_classes="workflow-panel"):
                     gr.Markdown("### Generate questions from your uploaded content", elem_classes="workflow-description")
                     with gr.Row(elem_classes="workflow-row"):
@@ -585,11 +750,11 @@ def create_gradio_interface(client=None):
                             with gr.Row():
                                 message = gr.Textbox(label="Your Message", placeholder="Continue the conversation…", lines=1, scale=4)
                                 send = gr.Button("📤 Send", scale=1)
-            gr.Markdown("---\n### 💡 How to Use\n1. **Upload:** Select one PDF, DOCX, audio or video file. Its Asset ID appears in every tab.\n2. **Questions:** Generate a question, provide feedback, refine automatically, then accept/save.\n3. **Summary:** Create main points and a detailed summary, revise, then accept/save.\n4. **Chat:** Start a conversation and ask follow-up questions about the selected file.")
+            gr.Markdown("---\n### 💡 How to Use\n1. **Upload:** Select one text, PDF, DOCX, audio or video file. Follow extraction, transcription and visual analysis progress. Its Asset ID appears in every tab.\n2. **Review:** Check the processing scope, warnings and source timestamps before using the content.\n3. **Questions:** Generate a question, provide feedback, refine automatically, then accept/save.\n4. **Summary:** Create main points and a detailed summary, revise, then accept/save.\n5. **Chat:** Start a conversation and ask follow-up questions about the selected file.")
         outputs = [state, asset_id, q_asset, s_asset, qa_asset, upload_status, extracted, question, options, answer,
                    explanation, q_status, main_points, summary, s_status, chatbot, qa_status,
                    q_feedback, s_feedback, initial_question, message,
-                   update_q, refine_q, accept_q, update_s, accept_s]
+                   update_q, refine_q, accept_q, update_s, accept_s, details, preview]
         event_options = dict(outputs=outputs, concurrency_limit=1, concurrency_id="single-file-workflow", trigger_mode="once", show_progress="minimal")
         upload_btn.click(ui.upload_file, [file_input, state], **event_options)
         load_btn.click(ui.load_text, [asset_id, state], **event_options)

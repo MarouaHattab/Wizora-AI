@@ -1,3 +1,4 @@
+import asyncio
 import json
 import math
 import mimetypes
@@ -21,6 +22,7 @@ class FrontendSettings(BaseSettings):
     FRONTEND_HOST: str = "127.0.0.1"
     FRONTEND_PORT: int = Field(default=7860, ge=1, le=65535)
     FRONTEND_TIMEOUT_SECONDS: float = Field(default=600, gt=0, allow_inf_nan=False)
+    FRONTEND_UPLOAD_TIMEOUT_SECONDS: float = Field(default=1800, gt=0, allow_inf_nan=False)
     MAX_UPLOAD_BYTES: int = Field(default=268435456, gt=0)
 
     @field_validator("FRONTEND_BACKEND_URL")
@@ -163,7 +165,7 @@ class BackendClient:
             raise BackendError("The backend returned an unexpected response", 502)
         return payload
 
-    async def upload(self, path: str | Path) -> dict[str, Any]:
+    async def _upload(self, path: str | Path, endpoint: str) -> dict[str, Any]:
         upload_path = Path(path)
         try:
             if upload_path.stat().st_size > self.settings.MAX_UPLOAD_BYTES:
@@ -171,17 +173,62 @@ class BackendClient:
             with upload_path.open("rb") as file:
                 content_type = mimetypes.guess_type(upload_path.name)[0] or "application/octet-stream"
                 return await self._request(
-                    "POST", "/api/v1/preprocessing/upload_file/",
+                    "POST", endpoint,
                     files={"file": (upload_path.name, file, content_type)},
                 )
         except OSError:
             raise BackendError("The selected upload file is unavailable", 422) from None
+
+    async def upload(self, path: str | Path) -> dict[str, Any]:
+        """Keep the synchronous upload endpoint available for existing callers."""
+        return await self._upload(path, "/api/v1/preprocessing/upload_file/")
+
+    async def queue_upload(self, path: str | Path) -> dict[str, Any]:
+        return await self._upload(path, "/api/v1/preprocessing/uploads")
+
+    async def get_upload(self, asset_id: str) -> dict[str, Any]:
+        return await self._request("GET", f"/api/v1/preprocessing/uploads/{_segment(asset_id)}")
+
+    async def upload_events(
+        self, path: str | Path, *, poll_interval: float = 1, timeout: float | None = None,
+    ) -> AsyncIterator[dict[str, Any]]:
+        """Submit once and report persisted progress until processing finishes."""
+        timeout = self.settings.FRONTEND_UPLOAD_TIMEOUT_SECONDS if timeout is None else timeout
+        if not math.isfinite(poll_interval) or poll_interval < 0 or not math.isfinite(timeout) or timeout <= 0:
+            raise BackendError("Invalid upload polling interval or timeout", 422)
+        job = await self.queue_upload(path)
+        asset_id = job.get("id")
+        _segment(asset_id)
+        deadline = asyncio.get_running_loop().time() + timeout
+        while True:
+            if job.get("id") != asset_id:
+                raise BackendError("The backend returned a different upload identifier", 502)
+            if job.get("status") not in {"queued", "processing", "ready", "failed"}:
+                raise BackendError("The backend returned an invalid upload status", 502)
+            yield job
+            if job["status"] == "ready":
+                return
+            if job["status"] == "failed":
+                error = job.get("error") or {}
+                detail = error.get("detail") if isinstance(error, dict) else error
+                raise BackendError(str(detail or "File processing failed; check the backend logs"), 422)
+            remaining = deadline - asyncio.get_running_loop().time()
+            if remaining <= 0:
+                raise BackendError(
+                    f"Processing is still running for Asset ID {asset_id}. Keep this ID and use Load Extracted Text to check again.",
+                    504,
+                )
+            await asyncio.sleep(min(poll_interval, remaining))
+            job = await self.get_upload(asset_id)
 
     async def get_asset(self, asset_id: str) -> dict[str, Any]:
         return await self._request("GET", f"/api/v1/preprocessing/assets/{_segment(asset_id)}")
 
     async def extracted_text(self, asset_id: str) -> dict[str, Any]:
         return await self._request("GET", f"/api/v1/preprocessing/get_extracted_text/{_segment(asset_id)}")
+
+    async def get_content(self, asset_id: str) -> dict[str, Any]:
+        return await self._request("GET", f"/api/v1/preprocessing/assets/{_segment(asset_id)}/content")
 
     async def get_session(self, workflow: Workflow, thread_id: str) -> dict[str, Any]:
         if workflow not in {"question_generation", "summarization", "qa"}:

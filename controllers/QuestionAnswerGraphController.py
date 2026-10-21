@@ -247,7 +247,7 @@ def _evidence_inputs(state):
 def _deterministic_decision(state):
     if not state["relevant_text"]:
         return EvidenceDecision(status="insufficient", supporting_chunk_ids=[], missing_information=state.get("retrieval_issue") or "No usable source excerpts were retrieved within the configured evidence budget.")
-    if state.get("retrieval_pass", 0) and not state.get("evidence_changed"):
+    if state.get("retrieval_pass", 0) and not state.get("evidence_changed") and state.get("grounding_status") != "rejected":
         return _decision(state)
     return None
 
@@ -328,10 +328,24 @@ def _grounding_inputs(state):
 
 def _rejected_grounding(state, call=None):
     metrics.increment("rag_grounding", workflow="qa", status="rejected")
-    return {**message_delta(state, UNVERIFIED, settings), "answer_draft": None,
+    # Corrective retrieval still needs the pending human question as the last
+    # message. Publish an abstention only after the bounded recovery is spent.
+    final_message = {} if _can_correct_grounding(state) else message_delta(state, UNVERIFIED, settings)
+    return {**final_message, "answer_draft": None,
             "answer_citations": [], "answer_status": "insufficient",
             "grounding_status": "rejected", "grounding_assessment": None,
             "rag_diagnostics": _diagnostics(state, call, grounding="rejected")}
+
+
+def _can_correct_grounding(state):
+    return not state.get("retrieval_issue") and state.get("retrieval_pass", 0) < settings.RAG_CORRECTIVE_PASSES
+
+
+def grounding_router(state):
+    decision = "correct" if state.get("grounding_status") == "rejected" and _can_correct_grounding(state) else "finish"
+    metrics.increment("graph_route", workflow="qa", decision="grounding_" + decision)
+    logger.info("qa grounding route=%s pass=%d", decision, state.get("retrieval_pass", 0))
+    return decision
 
 
 def _grounding_delta(state, assessment, call):
@@ -397,7 +411,8 @@ def _build_graph(answer_name):
                                 {"answer": answer_name, "correct": "corrective_retrieval", "abstain": "off_topic_response"})
     graph.add_edge("corrective_retrieval", "assess_evidence")
     graph.add_edge(answer_name, "validate_grounding")
-    graph.add_edge("validate_grounding", END)
+    graph.add_conditional_edges("validate_grounding", grounding_router,
+                                {"correct": "corrective_retrieval", "finish": END})
     graph.add_edge("off_topic_response", END)
     return graph
 

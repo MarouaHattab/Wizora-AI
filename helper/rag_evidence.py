@@ -190,6 +190,7 @@ def _citation(document, number, asset_id, index_version):
     citation.update({key: metadata[key] for key in (
         "source_type", "modality", "content_type", "page", "start", "end", "section", "paragraph",
         "element_id", "heading_level", "table_index", "segment_id", "record_id", "timestamp_precision",
+        "frame_index", "frame_reference", "vision_provider", "vision_model", "line_start", "line_end", "encoding",
     ) if metadata.get(key) is not None})
     return citation
 
@@ -225,7 +226,10 @@ def _source_label(citation):
             element = re.sub(r"([\\`*_{}\[\]()#+<>|])", r"\\\1", citation["element_id"])
             location.append("Element: " + element)
     if citation.get("source_type") == "video":
-        location.append("Transcript")
+        location.append(f"Sampled frame {citation.get('frame_index', '')}".strip()
+                        if citation.get("content_type") == "visual_description" else "Transcript")
+    if "line_start" in citation:
+        location.append(f"Lines {citation['line_start']}–{citation.get('line_end', citation['line_start'])}")
     if "start" in citation:
         time = _timestamp(citation["start"])
         if "end" in citation:

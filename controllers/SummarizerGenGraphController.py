@@ -7,6 +7,7 @@ from helper import get_settings
 from helper.workflow_metrics import metrics
 from helper.summary_revision import classify_summary_feedback
 from helper.workflow_history import human_feedback_value, revision_context, revision_delta
+from helper.content_context import prepare_source, join_sections, map_config
 from chains.contracts import ChainInputError, ProviderExecutionError, StructuredOutputError
 from chains.runtime import get_task_chain
 from .GraphState import SummaryGenState
@@ -19,27 +20,40 @@ logger = logging.getLogger("wizora.summary")
 
 
 def SummarizerMainPointNode(state: SummaryGenState, config: RunnableConfig = None) -> dict:
-    response = get_task_chain("main_points", settings).invoke({"context": state["context"]}, config=config)
-    return {"Main_Points": response}
+    prepared = prepare_source(state, settings)
+    parts = prepared["source_chunks"]
+    outlines = [get_task_chain("main_points", settings).invoke({"context": part["context"]}, config=map_config(config, len(parts))) for part in parts]
+    return {**prepared, "Main_Points": join_sections(outlines), "source_outlines": outlines}
 
 
 async def SummarizerMainPointNodeStream(state: SummaryGenState, config: RunnableConfig = None) -> dict:
-    response = await get_task_chain("main_points", settings).ainvoke({"context": state["context"]}, config=config)
-    return {"Main_Points": response}
+    import anyio
+    prepared = await anyio.to_thread.run_sync(prepare_source, state, settings)
+    parts, outlines = prepared["source_chunks"], []
+    for part in parts:
+        outlines.append(await get_task_chain("main_points", settings).ainvoke({"context": part["context"]}, config=map_config(config, len(parts))))
+    return {**prepared, "Main_Points": join_sections(outlines), "source_outlines": outlines}
 
 
 def _writer_inputs(state):
-    return {"context": state["context"], "table_of_contents": state["Main_Points"]}
+    parts = state.get("source_chunks") or [{"context": state["context"]}]
+    outlines = state.get("source_outlines") or [state["Main_Points"]]
+    if len(parts) != len(outlines):
+        raise ChainInputError("The source parts do not match their outlines; start a new summary")
+    return [{"context": part["context"], "table_of_contents": outline} for part, outline in zip(parts, outlines)]
 
 
 def SummarizerWriterNode(state: SummaryGenState, config: RunnableConfig = None) -> dict:
-    response = get_task_chain("summary", settings).invoke(_writer_inputs(state), config=config)
-    return {"summary": response}
+    inputs = _writer_inputs(state)
+    sections = [get_task_chain("summary", settings).invoke(item, config=map_config(config, len(inputs))) for item in inputs]
+    return {"summary": join_sections(sections), "summary_sections": sections}
 
 
 async def SummarizerWriterNodeStream(state: SummaryGenState, config: RunnableConfig = None) -> dict:
-    response = await get_task_chain("summary", settings).ainvoke(_writer_inputs(state), config=config)
-    return {"summary": response}
+    inputs, sections = _writer_inputs(state), []
+    for item in inputs:
+        sections.append(await get_task_chain("summary", settings).ainvoke(item, config=map_config(config, len(inputs))))
+    return {"summary": join_sections(sections), "summary_sections": sections}
 
 
 def _summary_feedback_delta(value):
@@ -70,6 +84,9 @@ def UserFeedbackNode(state: SummaryGenState) -> dict:
         "summary": state["summary"],
         "message": "Provide feedback or type 'save' to finish",
         "waiting_for_input": True,
+        "source_scope": state.get("source_scope", ""),
+        "context_note": state.get("context_note", ""),
+        "source_citations": state.get("source_citations", []),
     }
     if state.get("review_notice"):
         payload["revision_notice"] = state["review_notice"]
@@ -95,21 +112,27 @@ def Router(state: SummaryGenState) -> str:
 
 def _revision_inputs(state):
     kind = state.get("revision_kind") if state.get("revision_kind") in {"wording", "unsupported"} else "wording"
-    return {
-        "context": state["context"],
-        "original_summary": state["summary"],
+    parts = state.get("source_chunks") or [{"context": state["context"]}]
+    sections = state.get("summary_sections") or [state["summary"]]
+    if len(parts) != len(sections):
+        raise ChainInputError("The summary sections do not match their source parts")
+    return [{
+        "context": part["context"],
+        "original_summary": section,
         "user_feedback": {
             "kind": kind,
             "current": human_feedback_value(state),
             "prior": revision_context(state, settings),
         },
-    }
+    } for part, section in zip(parts, sections)]
 
 
-def _revision_delta(state, response):
+def _revision_delta(state, responses):
+    response = join_sections(responses)
     kind = state.get("revision_kind") if state.get("revision_kind") in {"wording", "unsupported"} else "wording"
     return {
         "summary": response,
+        "summary_sections": responses,
         "revision_kind": kind,
         "review_notice": None,
         **revision_delta(state, settings, draft=response, status="revised", reason=None),
@@ -128,7 +151,8 @@ def _unchanged_summary(state, notice):
 
 def SummarizerRewriterNode(state: SummaryGenState, config: RunnableConfig = None) -> dict:
     try:
-        response = get_task_chain("summary_revision", settings).invoke(_revision_inputs(state), config=config)
+        inputs = _revision_inputs(state)
+        response = [get_task_chain("summary_revision", settings).invoke(item, config=map_config(config, len(inputs))) for item in inputs]
     except (ChainInputError, StructuredOutputError, ProviderExecutionError):
         return _unchanged_summary(state, "The summary revision could not be validated, so the current draft was kept.")
     return _revision_delta(state, response)
@@ -136,37 +160,49 @@ def SummarizerRewriterNode(state: SummaryGenState, config: RunnableConfig = None
 
 async def SummarizerRewriterNodeStream(state: SummaryGenState, config: RunnableConfig = None) -> dict:
     try:
-        response = await get_task_chain("summary_revision", settings).ainvoke(_revision_inputs(state), config=config)
+        inputs, response = _revision_inputs(state), []
+        for item in inputs:
+            response.append(await get_task_chain("summary_revision", settings).ainvoke(item, config=map_config(config, len(inputs))))
     except (ChainInputError, StructuredOutputError, ProviderExecutionError):
         return _unchanged_summary(state, "The summary revision could not be validated, so the current draft was kept.")
     return _revision_delta(state, response)
 
 
 def _structure_inputs(state):
-    return {
-        "context": state["context"],
-        "outline": state["Main_Points"],
-        "original_summary": state["summary"],
+    parts = state.get("source_chunks") or [{"context": state["context"]}]
+    sections = state.get("summary_sections") or [state["summary"]]
+    outlines = state.get("source_outlines") or [state["Main_Points"]]
+    if len(parts) != len(sections) or len(parts) != len(outlines):
+        raise ChainInputError("The summary sections do not match their source parts")
+    return [{
+        "context": part["context"],
+        "outline": outline,
+        "original_summary": section,
         "user_feedback": human_feedback_value(state),
-    }
+    } for part, section, outline in zip(parts, sections, outlines)]
 
 
-def _structure_delta(state, result):
-    notice = result.limitation
+def _structure_delta(state, results):
+    notice = " ".join(dict.fromkeys(result.limitation for result in results if result.limitation)) or None
+    outline = join_sections([result.outline for result in results])
+    summary = join_sections([result.summary for result in results])
     return {
-        "Main_Points": result.outline,
-        "summary": result.summary,
+        "Main_Points": outline,
+        "summary": summary,
+        "source_outlines": [result.outline for result in results],
+        "summary_sections": [result.summary for result in results],
         "revision_kind": "structural",
         "review_notice": notice,
         **revision_delta(
-            state, settings, draft=result.summary, status="revised", reason=notice,
+            state, settings, draft=summary, status="revised", reason=notice,
         ),
     }
 
 
 def SummarizerStructureNode(state: SummaryGenState, config: RunnableConfig = None) -> dict:
     try:
-        result = get_task_chain("summary_structure_revision", settings).invoke(_structure_inputs(state), config=config)
+        inputs = _structure_inputs(state)
+        result = [get_task_chain("summary_structure_revision", settings).invoke(item, config=map_config(config, len(inputs))) for item in inputs]
     except (ChainInputError, StructuredOutputError, ProviderExecutionError):
         return _unchanged_summary(state, "The structural revision could not be validated, so the outline and summary were left unchanged.")
     return _structure_delta(state, result)
@@ -174,7 +210,9 @@ def SummarizerStructureNode(state: SummaryGenState, config: RunnableConfig = Non
 
 async def SummarizerStructureNodeStream(state: SummaryGenState, config: RunnableConfig = None) -> dict:
     try:
-        result = await get_task_chain("summary_structure_revision", settings).ainvoke(_structure_inputs(state), config=config)
+        inputs, result = _structure_inputs(state), []
+        for item in inputs:
+            result.append(await get_task_chain("summary_structure_revision", settings).ainvoke(item, config=map_config(config, len(inputs))))
     except (ChainInputError, StructuredOutputError, ProviderExecutionError):
         return _unchanged_summary(state, "The structural revision could not be validated, so the outline and summary were left unchanged.")
     return _structure_delta(state, result)

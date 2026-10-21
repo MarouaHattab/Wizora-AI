@@ -15,9 +15,11 @@ from helper.ingestion_errors import EmptyContentError, ProcessingError, StorageE
 from tools.docx_extractor_tool import extract_docx_documents
 from tools.media_processing import process_audio, process_video
 from tools.pdf_extractor_tool import extract_text_from_pdf
+from tools.text_extractor_tool import extract_text_documents
 
 FORMATS = {
     ".pdf": ("pdf", {"application/pdf"}),
+    ".txt": ("text", {"text/plain"}),
     ".docx": ("docx", {"application/vnd.openxmlformats-officedocument.wordprocessingml.document", "application/zip"}),
     ".mp3": ("audio", {"audio/mpeg", "audio/mp3"}), ".wav": ("audio", {"audio/wav", "audio/x-wav", "audio/wave"}),
     ".m4a": ("audio", {"audio/mp4", "audio/x-m4a", "video/mp4"}), ".flac": ("audio", {"audio/flac", "audio/x-flac"}),
@@ -41,7 +43,7 @@ class PreparedUpload:
 def source_kind(name, content_type):
     suffix = Path(name).suffix.lower()
     if suffix not in FORMATS:
-        raise HTTPException(status_code=415, detail="Upload a PDF, DOCX, audio, or video file")
+        raise HTTPException(status_code=415, detail="Upload a PDF, DOCX, TXT, audio, or video file")
     kind, types = FORMATS[suffix]
     declared = (content_type or "").split(";", 1)[0].strip().lower()
     if declared not in types | {"", "application/octet-stream", "binary/octet-stream"}:
@@ -102,11 +104,20 @@ def process_prepared(prepared):
             documents = extract_text_from_pdf(str(prepared.original), asset_id=asset_id, source_name=prepared.source_name,
                 ocr=settings.PDF_OCR_ENABLED, ocr_language=settings.PDF_OCR_LANGUAGE, max_ocr_pages=settings.PDF_MAX_OCR_PAGES)
             progress("pdf_extracted")
+            pages_with_text = {document.metadata["page"] for document in documents}
+            total_pages = documents[0].metadata.get("page_count", len(pages_with_text))
+            if len(pages_with_text) < total_pages:
+                metadata["warnings"] = [f"Only {len(pages_with_text)} of {total_pages} PDF pages contain extracted text. Blank or scanned pages were omitted; enable PDF_OCR_ENABLED for scanned pages."]
+            if documents[0].metadata.get("scanned_page_count", 0) and not settings.PDF_OCR_ENABLED:
+                metadata.setdefault("warnings", []).append("Scanned PDF pages were detected without OCR. Captions may be extracted while text inside page images remains unavailable.")
         elif prepared.source_type == "docx":
             documents = extract_docx_documents(str(prepared.original), asset_id=asset_id, source_name=prepared.source_name)
             progress("docx_extracted")
             images = prepared.staging / "images"
             metadata["files"] = [path.relative_to(prepared.staging).as_posix() for path in images.iterdir() if path.is_file()] if images.is_dir() else []
+        elif prepared.source_type == "text":
+            documents = extract_text_documents(str(prepared.original), asset_id=asset_id, source_name=prepared.source_name)
+            progress("text_extracted")
         else:
             processor = process_video if prepared.source_type == "video" else process_audio
             result = processor(str(prepared.original), asset_id=asset_id, source_name=prepared.source_name,
@@ -122,7 +133,8 @@ def process_prepared(prepared):
             raise StorageError("Asset already exists")
         prepared.staging.rename(destination)
         files = {prepared.original.name, *metadata.get("files", [])}
-        summary = {key: metadata[key] for key in ("duration_seconds", "audio_status", "processing_scope") if key in metadata}
+        summary = {key: metadata[key] for key in ("duration_seconds", "audio_status", "audio_reason", "processing_scope",
+                                                  "visual_status", "frame_count", "warnings") if key in metadata}
         summary.update(record_count=len(documents), content_types=dict(Counter(doc.metadata.get("content_type", "text") for doc in documents)),
             pages=sorted({doc.metadata["page"] for doc in documents if "page" in doc.metadata}),
             sections=list(dict.fromkeys(doc.metadata["section"] for doc in documents if "section" in doc.metadata)),

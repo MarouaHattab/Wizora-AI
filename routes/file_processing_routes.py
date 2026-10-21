@@ -107,13 +107,31 @@ async def asset_library():
 async def upload_configuration():
     settings = get_settings()
     return {"max_upload_bytes": settings.MAX_UPLOAD_BYTES, "extensions": sorted(FORMATS),
-            "video_processing": "transcript_only",
+            "video_processing": "transcript_only" if getattr(settings, "VISION_PROVIDER", "disabled") == "disabled" else "transcript_and_visuals",
+            "vision_provider": getattr(settings, "VISION_PROVIDER", "disabled"),
+            "max_media_duration_seconds": settings.VIDEO_MAX_DURATION_SECONDS,
             "index_on_upload": settings.INDEX_ON_UPLOAD}
 
 
 @router.get("/assets/{asset_id}")
 async def asset_metadata(asset_id: str):
     return await upload_status(asset_id)
+
+
+@router.get("/assets/{asset_id}/content")
+async def asset_content(asset_id: str):
+    """Inspect validated, persisted source text and its original source locators."""
+    from helper.asset_storage import load_asset_documents
+    try:
+        job = await anyio.to_thread.run_sync(read_job, asset_id)
+        if job.get("status") != "ready":
+            raise HTTPException(status_code=409, detail="The source is still processing or failed")
+        documents = await anyio.to_thread.run_sync(load_asset_documents, asset_id)
+        return {"asset_id": asset_id, "processing_scope": job.get("processing_scope"),
+                "warnings": job.get("warnings", []),
+                "documents": [{"page_content": item.page_content, "metadata": item.metadata} for item in documents]}
+    except ProcessingError as error:
+        raise processing_http_error(error) from None
 
 
 @router.get("/assets/{asset_id}/files/{reference:path}")

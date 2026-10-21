@@ -86,6 +86,20 @@ class Settings(BaseSettings):
     MEDIA_TIMEOUT_SECONDS: float = Field(default=180, gt=0, allow_inf_nan=False)
     VIDEO_MAX_DURATION_SECONDS: float = Field(default=7200, gt=0, allow_inf_nan=False)
     AUDIO_CHUNK_SECONDS: float = Field(default=300, ge=10, le=600)
+    WHISPER_MODEL: ModelName = "tiny"
+    WHISPER_LANGUAGE: str | None = None
+    WHISPER_DEVICE: Literal["cpu", "cuda", "auto"] = "cpu"
+    WHISPER_NO_SPEECH_THRESHOLD: float = Field(default=0.6, ge=0, le=1, allow_inf_nan=False)
+    VISION_PROVIDER: Literal["disabled", "OLLAMA", "GOOGLE_GENAI"] = "disabled"
+    VISION_MODEL: str | None = None
+    VISION_BASE_URL: str = "http://127.0.0.1:11434"
+    VISION_TIMEOUT_SECONDS: float = Field(default=60, gt=0, allow_inf_nan=False)
+    VIDEO_FRAME_INTERVAL_SECONDS: float = Field(default=30, ge=1, le=3600, allow_inf_nan=False)
+    VIDEO_MAX_FRAMES: int = Field(default=12, ge=1, le=64)
+    VIDEO_FRAME_MAX_DIMENSION: int = Field(default=960, ge=128, le=2048)
+    GENERATION_CONTEXT_CHARACTERS: int = Field(default=24000, ge=2000, le=200000)
+    GENERATION_CHUNK_CHARACTERS: int = Field(default=12000, ge=1000, le=60000)
+    GENERATION_MAX_CHUNKS: int = Field(default=64, ge=1, le=256)
     FFMPEG_BINARY: str | None = None
     FFPROBE_BINARY: str | None = None
     PDF_OCR_ENABLED: bool = False
@@ -95,6 +109,7 @@ class Settings(BaseSettings):
     FRONTEND_HOST: str = "127.0.0.1"
     FRONTEND_PORT: int = Field(default=7860, ge=1, le=65535)
     FRONTEND_TIMEOUT_SECONDS: float = Field(default=600, gt=0, allow_inf_nan=False)
+    FRONTEND_UPLOAD_TIMEOUT_SECONDS: float = Field(default=1800, gt=0, allow_inf_nan=False)
     FRONTEND_BROWSER_SECRET: SecretStr | None = None
 
     RAG_RETRIEVAL_STRATEGY: Literal["mmr", "similarity"] = "mmr"
@@ -138,10 +153,24 @@ class Settings(BaseSettings):
     def empty_secret(cls, value):
         return None if isinstance(value, str) and not value.strip() else value
 
-    @field_validator("FFMPEG_BINARY", "FFPROBE_BINARY", mode="before")
+    @field_validator("FFMPEG_BINARY", "FFPROBE_BINARY", "VISION_MODEL", "WHISPER_LANGUAGE", mode="before")
     @classmethod
     def empty_optional_setting(cls, value):
         return None if isinstance(value, str) and not value.strip() else value
+
+    @field_validator("VISION_PROVIDER", mode="before")
+    @classmethod
+    def normalize_vision_provider(cls, value):
+        if isinstance(value, str):
+            return "disabled" if value.strip().lower() == "disabled" else value.strip().upper()
+        return value
+
+    @field_validator("WHISPER_LANGUAGE")
+    @classmethod
+    def validate_whisper_language(cls, value):
+        if value is not None and (not value.isalpha() or len(value) > 32):
+            raise ValueError("WHISPER_LANGUAGE must be a language name or code")
+        return value.lower() if value else None
 
     @field_validator("LOG_LEVEL", mode="before")
     @classmethod
@@ -184,6 +213,8 @@ class Settings(BaseSettings):
             raise ValueError("CHECKPOINT_DATABASE is required")
         if self.SESSION_LEASE_SECONDS <= self.GRAPH_TIMEOUT_SECONDS:
             raise ValueError("SESSION_LEASE_SECONDS must be greater than GRAPH_TIMEOUT_SECONDS")
+        if self.VISION_PROVIDER != "disabled" and not self.VISION_MODEL:
+            raise ValueError("VISION_MODEL is required when vision processing is enabled")
         return self
 
 def get_settings():

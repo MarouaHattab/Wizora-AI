@@ -5,6 +5,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from helper import get_settings
 from helper.workflow_metrics import metrics
+from helper.content_context import prepare_source, duplicate_question
 from helper.question_review import (
     REVIEW_MESSAGE,
     accepted_feedback,
@@ -42,10 +43,11 @@ def current_question(state):
     })
 
 
-def _generation_inputs(state):
+def _generation_inputs(state, context=None, previous=None):
     if not state["context"].strip():
         raise InsufficientSourceError("The source contains no educational material.")
-    return {"context": state["context"], "question_type": state["question_type"]}
+    return {"context": context or state["context"], "question_type": state["question_type"],
+            "previous_questions": previous if previous is not None else state.get("previous_questions", [])}
 
 
 def _generation_delta(result):
@@ -62,16 +64,60 @@ def _generation_delta(result):
     }
 
 
+def _generation_attempts(state, prepared):
+    previous = state.get("previous_questions") or []
+    parts = prepared["source_chunks"]
+    for attempt in range(max(3, len(parts))):
+        index = (len(previous) + attempt) % len(parts)
+        yield index, parts[index], _generation_inputs(state, parts[index]["context"], previous)
+
+
+def _candidate_review(state, result, part):
+    if result.status != "generated" or duplicate_question(result.question.question, state.get("previous_questions") or []):
+        return None
+    question = validate_question_draft(state, result.question)
+    return {"context": part["context"], **question.model_dump()}
+
+
+def _prepared_generation_delta(state, result, prepared, index, part, critic):
+    if not critic.acceptable and any(issue.severity != "low" for issue in critic.issues):
+        return None
+    count = len(prepared["source_chunks"])
+    note = prepared["context_note"]
+    if count > 1:
+        note += f" This question uses source part {index + 1} of {count}; other parts are retained for subsequent questions."
+    return {**prepared, **_generation_delta(result), "source_context": part["context"],
+            "source_citations": part["citations"], "context_note": note,
+            "critic_feedback": critic, "previous_questions": state.get("previous_questions") or []}
+
+
 def QuestionGenerator(state: QuestionGenState, config: RunnableConfig = None) -> dict:
-    inputs = _generation_inputs(state)
-    result = get_task_chain("question_generation", settings).invoke(inputs, config=config)
-    return _generation_delta(result)
+    prepared = prepare_source(state, settings)
+    for index, part, inputs in _generation_attempts(state, prepared):
+        result = get_task_chain("question_generation", settings).invoke(inputs, config=config)
+        review = _candidate_review(state, result, part)
+        if review is None:
+            continue
+        critic = get_task_chain("question_review", settings).invoke(review, config=config)
+        delta = _prepared_generation_delta(state, result, prepared, index, part, critic)
+        if delta is not None:
+            return delta
+    raise InsufficientSourceError(f"A new, source-supported question could not be validated after checking all {len(prepared['source_chunks'])} retained source parts with bounded retries. Saved questions were excluded; try another question type or source section.")
 
 
 async def QuestionGeneratorStream(state: QuestionGenState, config: RunnableConfig = None) -> dict:
-    inputs = _generation_inputs(state)
-    result = await get_task_chain("question_generation", settings).ainvoke(inputs, config=config)
-    return _generation_delta(result)
+    import anyio
+    prepared = await anyio.to_thread.run_sync(prepare_source, state, settings)
+    for index, part, inputs in _generation_attempts(state, prepared):
+        result = await get_task_chain("question_generation", settings).ainvoke(inputs, config=config)
+        review = _candidate_review(state, result, part)
+        if review is None:
+            continue
+        critic = await get_task_chain("question_review", settings).ainvoke(review, config=config)
+        delta = _prepared_generation_delta(state, result, prepared, index, part, critic)
+        if delta is not None:
+            return delta
+    raise InsufficientSourceError(f"A new, source-supported question could not be validated after checking all {len(prepared['source_chunks'])} retained source parts with bounded retries. Saved questions were excluded; try another question type or source section.")
 
 
 def _human_feedback_delta(value):
@@ -106,6 +152,9 @@ def HumanFeedback(state: QuestionGenState) -> dict:
         "answer": state["answer"],
         "explanation": state["explanation"],
         "message": REVIEW_MESSAGE,
+        "source_scope": state.get("source_scope", ""),
+        "context_note": state.get("context_note", ""),
+        "source_citations": state.get("source_citations", []),
     }
     if critic is not None:
         payload["critic_verdict"] = critic.verdict
@@ -124,7 +173,7 @@ def Router(state: QuestionGenState) -> str:
 
 
 def _review_inputs(state):
-    return {"context": state["context"], **current_question(state).model_dump()}
+    return {"context": state.get("source_context") or state["context"], **current_question(state).model_dump()}
 
 
 def _critic_delta(state, critic, *, model_calls=0, notice=None, limit=False):
@@ -214,7 +263,7 @@ def _revision_inputs(state):
     if action not in {"refine", "revise"}:
         action = "revise"
     return {
-        "context": state["context"],
+        "context": state.get("source_context") or state["context"],
         "question_type": state["question_type"],
         "current_question": current_question(state),
         "action": action,
@@ -234,6 +283,8 @@ def _revision_delta(state, response):
     if action == "refine":
         revisions += 1
     question = validate_question_draft(state, response.question)
+    if duplicate_question(question.question, state.get("previous_questions") or []):
+        raise StructuredOutputError("The revision repeats an existing saved question")
     notice = None
     limit = action == "refine" and refine_budget_exhausted(
         {**state, "auto_revision_count": revisions, "review_model_calls": calls}, settings,

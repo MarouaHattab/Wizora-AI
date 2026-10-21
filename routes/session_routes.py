@@ -58,6 +58,9 @@ async def read_session(workflow: Workflow, thread_id: str):
             if workflow == "summarization" else {"answer_status", "answer_citations", "grounding_status"})
     result = {key: value.model_dump(mode="json") if isinstance(value, BaseModel) else value
               for key, value in state.items() if key in keys}
+    for key in ("source_citations", "source_scope", "context_note"):
+        if key in state:
+            result[key] = state[key]
     if workflow == "qa":
         result["messages"] = [{"role": "user" if message.type == "human" else "assistant", "content": message.content}
                               for message in canonical_messages(state)]

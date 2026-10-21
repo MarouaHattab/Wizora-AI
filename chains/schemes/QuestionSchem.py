@@ -46,9 +46,9 @@ class Question(StructuredResult):
 
 
 class GenerationResult(StructuredResult):
-    status: Literal["generated", "insufficient_source"]
-    question: Question | None
-    reason: NonemptyText | None
+    status: Literal["generated", "insufficient_source"] = Field(description="generated requires a complete question and reason null; insufficient_source requires question null and a nonblank reason.")
+    question: Question | None = Field(description="Complete question object only for generated; JSON null only for insufficient_source.")
+    reason: NonemptyText | None = Field(description="For generated, MUST be JSON null. For insufficient_source, REQUIRED nonblank explanation of the missing educational evidence; NEVER null.")
 
     @model_validator(mode="after")
     def validate_outcome(self):
@@ -61,9 +61,9 @@ class GenerationResult(StructuredResult):
 
 
 class TrueFalseQuestion(Question):
-    question_type: Literal["T/F"]
-    options: None
-    answer: Literal["True", "False"]
+    question_type: Literal["T/F"] = Field(description="Exactly the string T/F.")
+    options: None = Field(description="Required explicit JSON null for T/F, never an empty array or omitted field.")
+    answer: Literal["True", "False"] = Field(description="Exactly the JSON string True or False (quoted text), never a JSON boolean true or false.")
 
 
 class MCQQuestion(Question):
@@ -73,24 +73,24 @@ class MCQQuestion(Question):
 
 
 class TrueFalseGenerationResult(GenerationResult):
-    question: TrueFalseQuestion | None
+    question: TrueFalseQuestion | None = Field(description="For generated, a complete T/F question with options null and answer a quoted True/False string; for insufficient_source, JSON null.")
 
 
 class MCQGenerationResult(GenerationResult):
-    question: MCQQuestion | None
+    question: MCQQuestion | None = Field(description="For generated, a complete MCQ question; for insufficient_source, JSON null.")
 
 
 class RevisionResult(StructuredResult):
-    status: Literal["revised", "unchanged"]
-    question: Question
-    reason: NonemptyText | None
+    status: Literal["revised", "unchanged"] = Field(description="revised if any question field changed; unchanged only when every field exactly matches the current question.")
+    question: Question = Field(description="The complete resulting question. For unchanged, copy every current field exactly.")
+    reason: NonemptyText | None = Field(description="For unchanged, REQUIRED nonblank explanation of why no change is needed or possible, including an already-concise draft. NEVER null for unchanged. For revised, MUST be JSON null.")
 
     @model_validator(mode="after")
     def validate_outcome(self):
         if self.status == "revised" and self.reason is not None:
             raise ValueError("Revised results require a null reason")
         if self.status == "unchanged" and self.reason is None:
-            raise ValueError("Unchanged results require a reason describing the conflicting request")
+            raise ValueError("Unchanged results require a nonblank reason, including when the draft already satisfies the request")
         return self
 
 
