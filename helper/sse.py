@@ -9,6 +9,9 @@ import anyio
 from fastapi import HTTPException
 from httpx import TimeoutException
 from pydantic import ValidationError
+from google.api_core.exceptions import (
+    DeadlineExceeded, Forbidden, ServiceUnavailable, TooManyRequests, Unauthorized,
+)
 
 import sqlite3
 
@@ -55,10 +58,21 @@ class EventStream:
 
 def public_error(error):
     cause = error
-    for _ in range(4):
+    for _ in range(8):
         if isinstance(cause, (TimeoutError, TimeoutException)):
             return {"category": "timeout", "detail": "The workflow timed out"}
-        cause = getattr(cause, "__cause__", None)
+        if isinstance(cause, TooManyRequests):
+            return {
+                "category": "quota",
+                "detail": "The Google model quota has been reached. Wait for it to reset or use another configured model.",
+            }
+        if isinstance(cause, DeadlineExceeded):
+            return {"category": "timeout", "detail": "The Google model request timed out. Please try again."}
+        if isinstance(cause, ServiceUnavailable):
+            return {"category": "provider_unavailable", "detail": "The Google model is temporarily unavailable. Please try again."}
+        if isinstance(cause, (Unauthorized, Forbidden)):
+            return {"category": "provider_auth", "detail": "Google rejected the model credentials or permissions. Check the backend API key and model access."}
+        cause = getattr(cause, "__cause__", None) or getattr(cause, "__context__", None)
         if cause is None:
             break
     if isinstance(error, (StorageUnavailable, sqlite3.OperationalError)):

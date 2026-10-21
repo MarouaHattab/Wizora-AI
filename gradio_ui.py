@@ -9,43 +9,80 @@ from helper.frontend_client import BackendClient, BackendError, get_frontend_set
 
 SUPPORTED_EXTENSIONS = [".pdf", ".docx", ".mp3", ".wav", ".m4a", ".mp4", ".mov", ".mkv", ".webm"]
 CUSTOM_CSS = """
-body { background: #ffffff !important; }
-.gradio-container { max-width: 1200px !important; margin: auto !important;
-    background: #ffffff !important; color: #1f2937 !important; color-scheme: light; }
-.header { text-align: center; }
-.gradio-container textarea, .gradio-container input { color: #1f2937 !important; background: #ffffff !important; }
-.gradio-container #workflow-tabs .tab-wrapper { height: auto; min-height: 44px; padding-bottom: 0; }
-.gradio-container #workflow-tabs .tab-container { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr));
-    align-items: stretch; box-sizing: border-box; height: auto; gap: 4px; padding: 6px !important; }
-.gradio-container #workflow-tabs .tab-container.visually-hidden { width: 100%; }
-.gradio-container #workflow-tabs [role="tablist"] { background: linear-gradient(90deg, #667eea 0%, #764ba2 100%) !important;
-    border-radius: 8px 8px 0 0; overflow: visible; }
-.gradio-container #workflow-tabs .tab-container button { justify-content: center; min-width: 0;
-    min-height: 44px; padding: 10px 8px; white-space: normal; line-height: 1.35; text-align: center; }
-.gradio-container #workflow-tabs [role="tab"] { color: white !important; border-radius: 6px !important;
-    border: none !important; background: transparent !important; }
+/* Keep the interface light and task-focused, with the Wizora-AI visual language. */
+body { background: #f8fafc !important; }
+.gradio-container { width: 100% !important; max-width: none !important; margin: 0 !important;
+    padding: 28px 32px 44px !important; background: #f8fafc !important;
+    color: #1f2937 !important; color-scheme: light; }
+.header { text-align: center; margin: 0 auto 22px !important; padding: 8px 16px 18px !important;
+    background: transparent; }
+.header h1 { margin-bottom: 4px !important; color: #312e81; letter-spacing: -.02em; }
+.header h3 { color: #6b21a8; font-weight: 600; }
+.gradio-container textarea, .gradio-container input { color: #1f2937 !important;
+    background: #ffffff !important; }
+.gradio-container label span { color: #374151 !important; font-weight: 600; }
+.gradio-container #workflow-tabs { overflow: hidden; border-radius: 18px;
+    background: #ffffff; box-shadow: 0 8px 28px rgba(76, 29, 149, .10); }
+.gradio-container #workflow-tabs .tab-wrapper { height: auto; min-height: 56px; padding: 0; }
+.gradio-container #workflow-tabs .tab-container { display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr)); align-items: stretch;
+    box-sizing: border-box; height: auto; gap: 6px; padding: 7px !important; }
+.gradio-container #workflow-tabs [role="tablist"] {
+    background: linear-gradient(90deg, #667eea 0%, #764ba2 100%) !important;
+    border-radius: 0; }
+.gradio-container #workflow-tabs .tab-container button { justify-content: center;
+    min-width: 0; min-height: 46px; padding: 10px 8px; white-space: normal;
+    line-height: 1.3; text-align: center; }
+.gradio-container #workflow-tabs [role="tab"] { color: #f8fafc !important;
+    border-radius: 11px !important; border: 1px solid transparent !important;
+    background: transparent !important; font-weight: 600; }
 .gradio-container #workflow-tabs [role="tab"]:hover:not(:disabled),
-.gradio-container #workflow-tabs [role="tab"]:focus-visible,
 .gradio-container #workflow-tabs [role="tab"][aria-selected="true"] {
-    background: #563690 !important; color: #ffffff !important; }
-.gradio-container #workflow-tabs [role="tab"]:focus-visible { outline: 2px solid #ffffff; outline-offset: -4px; }
-.gradio-container #workflow-tabs [role="tab"][aria-selected="true"]::after { background: #ffffff !important; }
-@media (max-width: 720px) {
-    .gradio-container #workflow-tabs .tab-container { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-}
-.upload-area { border: 2px dashed #e0e7ff !important; border-radius: 12px !important;
-    background: #f8fafc !important; transition: all .3s ease !important; }
-.upload-area:hover { border-color: #4f46e5 !important; background: #f1f5f9 !important; }
+    background: rgba(49, 46, 129, .72) !important; color: #ffffff !important; }
+.gradio-container #workflow-tabs [role="tab"]:focus-visible {
+    outline: 3px solid #fef08a !important; outline-offset: -5px; }
+.gradio-container #workflow-tabs [role="tab"][aria-selected="true"]::after {
+    background: #ffffff !important; }
+.workflow-panel { padding: 24px 24px 28px !important; }
+.workflow-description { margin: 0 0 18px !important; color: #4b5563; }
+.workflow-row { gap: 22px !important; align-items: start; }
+.workflow-card { padding: 18px !important; border-radius: 16px;
+    border: 1px solid #e5e7eb; background: #ffffff; }
+.workflow-results { background: #ffffff; }
+.upload-area { border: 2px dashed #e0e7ff !important; border-radius: 16px !important;
+    background: #ffffff !important; transition: border-color .2s ease, background .2s ease !important; }
+.upload-area:hover, .upload-area:focus-within { border-color: #4f46e5 !important;
+    background: #eef2ff !important; }
 .button-primary { background: linear-gradient(90deg, #4f46e5 0%, #7c3aed 100%) !important;
-    border: none !important; color: white !important; border-radius: 8px !important;
-    padding: 10px 20px !important; transition: all .3s ease !important; }
-.button-primary:hover { transform: translateY(-2px); box-shadow: 0 4px 12px rgba(79,70,229,.4); }
-.extracted-text textarea { font-family: 'Courier New', monospace !important;
+    border: none !important; color: #ffffff !important; border-radius: 11px !important;
+    padding: 11px 20px !important; font-weight: 700 !important;
+    transition: transform .2s ease, box-shadow .2s ease !important; }
+.button-primary:hover:not(:disabled) { transform: translateY(-1px);
+    box-shadow: 0 6px 16px rgba(79, 70, 229, .28); }
+.gradio-container button:focus-visible, .gradio-container input:focus-visible,
+.gradio-container textarea:focus-visible { outline: 3px solid #a78bfa !important;
+    outline-offset: 2px; }
+.extracted-text textarea, .workflow-results textarea { line-height: 1.55 !important; }
+.extracted-text textarea { font-family: "Courier New", Courier, monospace !important;
     background: #f8fafc !important; max-height: 600px !important; overflow-y: auto !important; }
-.status { border: 1px solid #e2e8f0; background: #f8fafc; border-radius: 8px; padding: 12px; }
-.chat-container { max-height: 500px; overflow-y: auto; }
-@media (prefers-reduced-motion: reduce) { .button-primary, .upload-area { transition: none !important; }
-    .button-primary:hover { transform: none; } }
+.status { border: 1px solid #c7d2fe; background: #eef2ff; color: #312e81;
+    border-radius: 11px; padding: 12px 14px; margin-top: 16px; }
+.status-success { border-color: #86efac; background: #f0fdf4; color: #166534; }
+.status-error { border-color: #fca5a5; background: #fef2f2; color: #991b1b; }
+.chat-container { max-height: 500px !important; overflow-y: auto !important; background: #ffffff !important;
+    border: 1px solid #e5e7eb !important; border-radius: 14px !important; }
+@media (max-width: 720px) {
+    .gradio-container { padding: 16px 10px 28px !important; }
+    .header { padding: 18px 14px !important; border-radius: 16px; }
+    .gradio-container #workflow-tabs .tab-container { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .workflow-panel { padding: 18px 12px 22px !important; }
+    .workflow-row { gap: 12px !important; }
+    .workflow-card { padding: 13px !important; }
+}
+@media (prefers-reduced-motion: reduce) {
+    .button-primary, .upload-area { transition: none !important; }
+    .button-primary:hover { transform: none; }
+}
 """
 
 
@@ -87,6 +124,16 @@ class GradioUI:
                     and current.get("review_id") and not current.get("busy"))
 
     @staticmethod
+    def _status_update(text):
+        status_class = ("status-success" if text.startswith("✅") else
+                        "status-error" if text.startswith("❌") else "status")
+        return {
+            "__type__": "update",
+            "value": text,
+            "elem_classes": ["status", status_class],
+        }
+
+    @staticmethod
     def render(state, *, clear_inputs=False, clear_message=False):
         question, summary, qa = (state.get(key, {}) for key in ("question", "summary", "qa"))
         draft = question.get("result", {})
@@ -102,12 +149,14 @@ class GradioUI:
         summary_ready = GradioUI._review_pending(summary)
         return (
             state, *([state.get("asset_id", "")] * 4),
-            state["upload_status"], state.get("extracted_text", ""),
+            GradioUI._status_update(state["upload_status"]), state.get("extracted_text", ""),
             draft.get("question", ""), "\n".join(str(item) for item in (draft.get("options") or [])),
-            str(draft.get("answer", "")), draft.get("explanation", ""), state["question_status"],
+            str(draft.get("answer", "")), draft.get("explanation", ""),
+            GradioUI._status_update(state["question_status"]),
             summary.get("preview_outline", summary.get("outline", "")),
-            summary.get("preview_summary", summary.get("text", "")), state["summary_status"],
-            history, state["qa_status"], clear, clear, clear,
+            summary.get("preview_summary", summary.get("text", "")),
+            GradioUI._status_update(state["summary_status"]),
+            history, GradioUI._status_update(state["qa_status"]), clear, clear, clear,
             "" if clear_inputs or clear_message else gr.skip(),
             *[gr.update(interactive=question_ready) for _ in range(3)],
             *[gr.update(interactive=summary_ready) for _ in range(2)],
@@ -477,65 +526,66 @@ def create_gradio_interface(client=None):
     ui = GradioUI(client)
     with gr.Blocks(title="Wizora-AI — AI Teaching Assistant", analytics_enabled=False) as app:
         state = gr.State(empty_state)
-        gr.Markdown("# 🎓 Wizora-AI\n### AI Teaching Assistant\nUpload content, generate questions, create summaries and chat with your materials.", elem_classes="header")
-        with gr.Tabs(elem_id="workflow-tabs"):
-            with gr.Tab("📁 Upload Content", elem_id="upload-tab"):
-                gr.Markdown("### Upload a PDF, DOCX, audio or video file for processing")
-                with gr.Row():
-                    with gr.Column(scale=1):
-                        file_input = gr.File(label="Select File", file_count="single", type="filepath", file_types=SUPPORTED_EXTENSIONS, elem_classes="upload-area")
-                        upload_btn = gr.Button("🚀 Upload File", variant="primary", elem_classes="button-primary")
-                        asset_id = gr.Textbox(label="Generated Asset ID", placeholder="Asset ID will appear here after upload…")
-                        load_btn = gr.Button("📄 Load Extracted Text")
-                        upload_status = gr.Markdown(empty_state()["upload_status"], elem_classes="status")
-                    with gr.Column(scale=2):
-                        extracted = gr.Textbox(label="Extracted Text", placeholder="Extracted text or transcript will appear here after upload…", lines=15, max_lines=20, interactive=False, buttons=["copy"], elem_classes="extracted-text")
-            with gr.Tab("❓ Question Generation", elem_id="question-tab"):
-                gr.Markdown("### Generate questions from your uploaded content")
-                with gr.Row():
-                    with gr.Column(scale=1):
-                        q_asset = gr.Textbox(label="Asset ID", placeholder="Populated automatically after upload…")
-                        question_type = gr.Radio(choices=["T/F", "MCQ"], label="Question Type", value="MCQ")
-                        generate_q = gr.Button("🎯 Generate Question", variant="primary", elem_classes="button-primary")
-                    with gr.Column(scale=2):
-                        question = gr.Textbox(label="Generated Question", lines=3, interactive=False)
-                        options = gr.Textbox(label="Answer Options", lines=4, interactive=False)
-                        answer = gr.Textbox(label="Correct Answer", lines=1, interactive=False)
-                        explanation = gr.Textbox(label="Explanation", lines=3, interactive=False)
-                with gr.Row():
-                    q_feedback = gr.Textbox(label="Feedback", placeholder="Provide feedback to improve the question…", lines=2, scale=3)
-                    update_q = gr.Button("🔄 Update Question", scale=1, interactive=False)
-                with gr.Row():
-                    refine_q = gr.Button("✨ Automatically Refine", interactive=False)
-                    accept_q = gr.Button("✅ Accept / Save Question", interactive=False)
-                q_status = gr.Markdown(empty_state()["question_status"], elem_classes="status")
-            with gr.Tab("📝 Content Summarization", elem_id="summary-tab"):
-                gr.Markdown("### Create summaries and main points from your content")
-                with gr.Row():
-                    with gr.Column(scale=1):
-                        s_asset = gr.Textbox(label="Asset ID", placeholder="Populated automatically after upload…")
-                        generate_s = gr.Button("📊 Generate Summary", variant="primary", elem_classes="button-primary")
-                        s_feedback = gr.Textbox(label="Feedback", placeholder="Describe wording changes or how to reorganize the outline and sections…", lines=3)
-                        update_s = gr.Button("🔄 Update Summary", interactive=False)
-                        accept_s = gr.Button("✅ Accept / Save Summary", interactive=False)
-                    with gr.Column(scale=2):
-                        main_points = gr.Textbox(label="Main Points", lines=6, interactive=False, buttons=["copy"])
-                        summary = gr.Textbox(label="Detailed Summary", lines=8, interactive=False, buttons=["copy"])
-                s_status = gr.Markdown(empty_state()["summary_status"], elem_classes="status")
-            with gr.Tab("💬 Question Answering", elem_id="qa-tab"):
-                gr.Markdown("### Ask questions about your uploaded content")
-                with gr.Row():
-                    with gr.Column(scale=1):
-                        qa_asset = gr.Textbox(label="Asset ID", placeholder="Populated automatically after upload…")
-                        initial_question = gr.Textbox(label="Initial Question", placeholder="Ask your first question about the content…", lines=2)
-                        start_qa = gr.Button("🚀 Start Q&A Session", variant="primary", elem_classes="button-primary")
-                        qa_status = gr.Markdown(empty_state()["qa_status"], elem_classes="status")
-                    with gr.Column(scale=2):
-                        chatbot = gr.Chatbot(label="Conversation", height=400, elem_classes="chat-container", buttons=["copy_all"], placeholder="Answers and source citations will appear here.")
-                        with gr.Row():
-                            message = gr.Textbox(label="Your Message", placeholder="Continue the conversation…", lines=1, scale=4)
-                            send = gr.Button("📤 Send", scale=1)
-        gr.Markdown("---\n### 💡 How to Use\n1. **Upload:** Select one PDF, DOCX, audio or video file. Its Asset ID appears in every tab.\n2. **Questions:** Generate a question, provide feedback, refine automatically, then accept/save.\n3. **Summary:** Create main points and a detailed summary, revise, then accept/save.\n4. **Chat:** Start a conversation and ask follow-up questions about the selected file.")
+        with gr.Column():
+            gr.Markdown("# 🎓 Wizora-AI\n### AI Teaching Assistant\nUpload content, generate questions, create summaries and chat with your materials.", elem_classes="header")
+            with gr.Tabs(elem_id="workflow-tabs"):
+                with gr.Tab("📁 Upload Content", elem_id="upload-tab", elem_classes="workflow-panel"):
+                    gr.Markdown("### Upload a PDF, DOCX, audio or video file for processing", elem_classes="workflow-description")
+                    with gr.Row(elem_classes="workflow-row"):
+                        with gr.Column(scale=1, elem_classes=["workflow-card", "workflow-controls"]):
+                            file_input = gr.File(label="Select File", file_count="single", type="filepath", file_types=SUPPORTED_EXTENSIONS, elem_classes="upload-area")
+                            upload_btn = gr.Button("🚀 Upload File", variant="primary", elem_classes="button-primary")
+                            asset_id = gr.Textbox(label="Generated Asset ID", placeholder="Asset ID will appear here after upload…")
+                            load_btn = gr.Button("📄 Load Extracted Text")
+                            upload_status = gr.Markdown(empty_state()["upload_status"], elem_classes="status")
+                        with gr.Column(scale=2, elem_classes=["workflow-card", "workflow-results"]):
+                            extracted = gr.Textbox(label="Extracted Text", placeholder="Extracted text or transcript will appear here after upload…", lines=15, max_lines=20, interactive=False, buttons=["copy"], elem_classes="extracted-text")
+                with gr.Tab("❓ Question Generation", elem_id="question-tab", elem_classes="workflow-panel"):
+                    gr.Markdown("### Generate questions from your uploaded content", elem_classes="workflow-description")
+                    with gr.Row(elem_classes="workflow-row"):
+                        with gr.Column(scale=1, elem_classes=["workflow-card", "workflow-controls"]):
+                            q_asset = gr.Textbox(label="Asset ID", placeholder="Populated automatically after upload…")
+                            question_type = gr.Radio(choices=["T/F", "MCQ"], label="Question Type", value="MCQ")
+                            generate_q = gr.Button("🎯 Generate Question", variant="primary", elem_classes="button-primary")
+                        with gr.Column(scale=2, elem_classes=["workflow-card", "workflow-results"]):
+                            question = gr.Textbox(label="Generated Question", lines=3, interactive=False)
+                            options = gr.Textbox(label="Answer Options", lines=4, interactive=False)
+                            answer = gr.Textbox(label="Correct Answer", lines=1, interactive=False)
+                            explanation = gr.Textbox(label="Explanation", lines=3, interactive=False)
+                    with gr.Row():
+                        q_feedback = gr.Textbox(label="Feedback", placeholder="Provide feedback to improve the question…", lines=2, scale=3)
+                        update_q = gr.Button("🔄 Update Question", scale=1, interactive=False)
+                    with gr.Row():
+                        refine_q = gr.Button("✨ Automatically Refine", interactive=False)
+                        accept_q = gr.Button("✅ Accept / Save Question", interactive=False)
+                    q_status = gr.Markdown(empty_state()["question_status"], elem_classes="status")
+                with gr.Tab("📝 Content Summarization", elem_id="summary-tab", elem_classes="workflow-panel"):
+                    gr.Markdown("### Create summaries and main points from your content", elem_classes="workflow-description")
+                    with gr.Row(elem_classes="workflow-row"):
+                        with gr.Column(scale=1, elem_classes=["workflow-card", "workflow-controls"]):
+                            s_asset = gr.Textbox(label="Asset ID", placeholder="Populated automatically after upload…")
+                            generate_s = gr.Button("📊 Generate Summary", variant="primary", elem_classes="button-primary")
+                            s_feedback = gr.Textbox(label="Feedback", placeholder="Describe wording changes or how to reorganize the outline and sections…", lines=3)
+                            update_s = gr.Button("🔄 Update Summary", interactive=False)
+                            accept_s = gr.Button("✅ Accept / Save Summary", interactive=False)
+                        with gr.Column(scale=2, elem_classes=["workflow-card", "workflow-results"]):
+                            main_points = gr.Textbox(label="Main Points", lines=6, interactive=False, buttons=["copy"])
+                            summary = gr.Textbox(label="Detailed Summary", lines=8, interactive=False, buttons=["copy"])
+                    s_status = gr.Markdown(empty_state()["summary_status"], elem_classes="status")
+                with gr.Tab("💬 Question Answering", elem_id="qa-tab", elem_classes="workflow-panel"):
+                    gr.Markdown("### Ask questions about your uploaded content", elem_classes="workflow-description")
+                    with gr.Row(elem_classes="workflow-row"):
+                        with gr.Column(scale=1, elem_classes=["workflow-card", "workflow-controls"]):
+                            qa_asset = gr.Textbox(label="Asset ID", placeholder="Populated automatically after upload…")
+                            initial_question = gr.Textbox(label="Initial Question", placeholder="Ask your first question about the content…", lines=2)
+                            start_qa = gr.Button("🚀 Start Q&A Session", variant="primary", elem_classes="button-primary")
+                            qa_status = gr.Markdown(empty_state()["qa_status"], elem_classes="status")
+                        with gr.Column(scale=2, elem_classes=["workflow-card", "workflow-results"]):
+                            chatbot = gr.Chatbot(label="Conversation", height=400, elem_classes="chat-container", buttons=["copy_all"], placeholder="Answers and source citations will appear here.")
+                            with gr.Row():
+                                message = gr.Textbox(label="Your Message", placeholder="Continue the conversation…", lines=1, scale=4)
+                                send = gr.Button("📤 Send", scale=1)
+            gr.Markdown("---\n### 💡 How to Use\n1. **Upload:** Select one PDF, DOCX, audio or video file. Its Asset ID appears in every tab.\n2. **Questions:** Generate a question, provide feedback, refine automatically, then accept/save.\n3. **Summary:** Create main points and a detailed summary, revise, then accept/save.\n4. **Chat:** Start a conversation and ask follow-up questions about the selected file.")
         outputs = [state, asset_id, q_asset, s_asset, qa_asset, upload_status, extracted, question, options, answer,
                    explanation, q_status, main_points, summary, s_status, chatbot, qa_status,
                    q_feedback, s_feedback, initial_question, message,

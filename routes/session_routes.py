@@ -1,15 +1,45 @@
 from typing import Literal
 from uuid import UUID
 
+import anyio
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
+from chains.contracts import StructuredOutputError
+from helper.asset_paths import validate_asset_id
+from helper.ingestion_errors import InvalidAssetError
+from helper.question_review import validate_question_draft
 from helper.session_review import review_revision, session_status
+from helper.session_store import completed_sessions
 from helper.workflow_history import canonical_messages
 from helper.workflow_runtime import require_graph
 
 router = APIRouter()
 Workflow = Literal["question_generation", "summarization", "qa"]
+
+
+@router.get("/question_generation")
+async def saved_questions(asset_id: str | None = None):
+    if asset_id is not None:
+        try:
+            validate_asset_id(asset_id)
+        except InvalidAssetError:
+            raise HTTPException(status_code=400, detail="Invalid asset identifier") from None
+    graph = require_graph("question_generation")
+    sessions = await anyio.to_thread.run_sync(completed_sessions, "question_generation", asset_id)
+    questions = []
+    for session in sessions:
+        snapshot = await graph.aget_state({"configurable": {"thread_id": session["thread_id"]}})
+        if session_status(snapshot) != "completed":
+            continue
+        if snapshot.values.get("asset_id") != session["asset_id"]:
+            raise HTTPException(status_code=502, detail="Saved question does not match its source")
+        try:
+            question = validate_question_draft(snapshot.values)
+        except (StructuredOutputError, KeyError):
+            raise HTTPException(status_code=502, detail="A saved question could not be validated") from None
+        questions.append({**session, "result": question.model_dump(mode="json")})
+    return {"questions": questions}
 
 
 @router.get("/{workflow}/{thread_id}")

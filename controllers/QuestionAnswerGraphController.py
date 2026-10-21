@@ -10,13 +10,13 @@ from langgraph.graph import END, START, StateGraph
 
 from helper.workflow_metrics import metrics
 
-from chains.contracts import ChainInputError, ProviderExecutionError, StructuredOutputError, structured_output, text_fragment, text_output
+from chains.contracts import ChainInputError, StructuredOutputError, structured_output, text_fragment, text_output
 from chains.runtime import get_task_chain, get_task_token_counter
 from chains.schemes.RAGSchem import EvidenceDecision, GroundedAnswer
 from helper import get_settings
 from helper.asset_index import RetrievalHit, ensure_asset_index
 from helper.asset_storage import load_asset_documents
-from helper.rag_context import CallMetrics, bounded_history, bounded_user_history, conservative_token_count, evidence_budget, fallback_query, needs_context
+from helper.rag_context import CallMetrics, bounded_history, conservative_token_count, evidence_budget, fallback_query, needs_context
 from helper.rag_evidence import render_cited_answer, select_evidence, validate_evidence
 from helper.workflow_history import canonical_messages, message_delta
 from .GraphState import QuestionAnswerState
@@ -37,10 +37,6 @@ def _question_text(state):
 
 def _history(state):
     return bounded_history(canonical_messages(state)[:-1], _question_text(state), settings)
-
-
-def _user_history(state):
-    return bounded_user_history(canonical_messages(state)[:-1], settings)
 
 
 def _call_config(config, metrics):
@@ -98,7 +94,7 @@ def _query_start(state):
 
 
 def _rewrite_inputs(state):
-    return {"question": _question_text(state), "history": _user_history(state),
+    return {"question": _question_text(state), "history": _history(state),
             "history_messages": settings.RAG_HISTORY_MESSAGES, "history_characters": settings.RAG_HISTORY_CHARACTERS}
 
 
@@ -116,7 +112,7 @@ def _rewrite_delta(state, delta, result, metrics):
 
 def _rewrite_fallback(state, delta, metrics=None):
     return {**delta, "retrieval_query": fallback_query(
-        _question_text(state), _user_history(state), settings.RAG_QUERY_MAX_CHARACTERS,
+        _question_text(state), _history(state), settings.RAG_QUERY_MAX_CHARACTERS,
     ), "rag_diagnostics": {"rewrite": "fallback" if metrics else "deterministic",
         "model_calls": [metrics.result("query_rewrite", outcome="fallback")] if metrics else []}}
 
@@ -129,7 +125,7 @@ def understand_query(state: QuestionAnswerState, config: RunnableConfig = None):
     delta = _query_start(state)
     if not _rewrite_needed(state):
         return delta
-    if not _user_history(state):
+    if not _history(state):
         return _unresolved_query(delta)
     if not settings.RAG_REWRITE_ENABLED:
         return _rewrite_fallback(state, delta)
@@ -145,7 +141,7 @@ async def understand_query_async(state: QuestionAnswerState, config: RunnableCon
     delta = _query_start(state)
     if not _rewrite_needed(state):
         return delta
-    if not _user_history(state):
+    if not _history(state):
         return _unresolved_query(delta)
     if not settings.RAG_REWRITE_ENABLED:
         return _rewrite_fallback(state, delta)
@@ -357,7 +353,7 @@ def _grounding_delta(state, assessment, call):
 def validate_grounding(state: QuestionAnswerState, config: RunnableConfig = None):
     try:
         assessment, call = _call("grounding_check", _grounding_inputs(state), config)
-    except (ChainInputError, StructuredOutputError, ProviderExecutionError) as exc:
+    except (ChainInputError, StructuredOutputError) as exc:
         logger.warning("Grounding check could not verify the draft answer (exception_type=%s)", type(exc).__name__)
         return _rejected_grounding(state)
     return _grounding_delta(state, assessment, call)
@@ -366,7 +362,7 @@ def validate_grounding(state: QuestionAnswerState, config: RunnableConfig = None
 async def validate_grounding_async(state: QuestionAnswerState, config: RunnableConfig = None):
     try:
         assessment, call = await _acall("grounding_check", _grounding_inputs(state), config)
-    except (ChainInputError, StructuredOutputError, ProviderExecutionError) as exc:
+    except (ChainInputError, StructuredOutputError) as exc:
         logger.warning("Grounding check could not verify the draft answer (exception_type=%s)", type(exc).__name__)
         return _rejected_grounding(state)
     return _grounding_delta(state, assessment, call)

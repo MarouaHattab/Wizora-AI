@@ -188,6 +188,24 @@ def fetch_session(workflow, thread_id):
     return dict(row) if row is not None else None
 
 
+def completed_sessions(workflow, asset_id=None):
+    """Discover accepted results using the metadata beside their checkpoints."""
+    with _db_lock:
+        conn = _connection()
+        try:
+            rows = conn.execute(
+                """
+                SELECT thread_id, asset_id, completed_at FROM wizora_session
+                WHERE workflow=? AND status='completed' AND (? IS NULL OR asset_id=?)
+                ORDER BY completed_at DESC, thread_id
+                """,
+                (workflow, asset_id, asset_id),
+            ).fetchall()
+        except sqlite3.Error as exc:
+            raise StorageUnavailable("Workflow storage is unavailable") from exc
+    return [dict(row) for row in rows]
+
+
 def is_expired(workflow, thread_id, cutoff):
     with _db_lock:
         conn = _conn

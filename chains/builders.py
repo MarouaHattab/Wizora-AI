@@ -390,7 +390,10 @@ def build_task_chain(task: str, llm) -> Runnable:
     except (KeyError, TypeError):
         raise ChainInputError("Unknown LLM task") from None
     chain = builder(llm)
-    if task in {"question_generation", "question_revision"}:
+    if task in {
+        "question_generation", "question_revision", "query_rewrite",
+        "evidence_assessment", "grounded_answer", "grounding_check",
+    }:
         retried = chain.with_retry(
             retry_if_exception_type=(StructuredOutputError,),
             stop_after_attempt=2, wait_exponential_jitter=False,

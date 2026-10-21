@@ -12,7 +12,9 @@ from .Enums import LLMEnums
 class CompatibleChatGoogleGenerativeAI(ChatGoogleGenerativeAI):
     @property
     def _supports_tool_choice(self) -> bool:
-        return self.model.removeprefix("models/") == "gemini-3.8-flash" or super()._supports_tool_choice
+        return self.model.removeprefix("models/") in {
+            "gemini-3.5-flash-lite", "gemini-3.8-flash"
+        } or super()._supports_tool_choice
 
     def _request_options(self, kwargs):
         # The pinned adapter declares timeout without forwarding it to its SDK.

@@ -95,10 +95,11 @@ class AssetIndex:
                     or document.metadata.get("index_version") != self.index_version
                     or expected is None
                     or document.page_content != expected[0]
-                    or document.metadata != expected[1]
+                    or not _metadata_matches(document.metadata, expected[1])
                     or document.id not in (None, chunk_id)
                 ):
                     raise IndexingError("Retrieved content does not match the requested asset index")
+                document.metadata = expected[1]
                 document.id = chunk_id
             return documents
 
@@ -250,6 +251,27 @@ def _vector_distance(query, vector, metric):
     return 1.0 - float(np.dot(query, vector)) / denominator if denominator else 1.0
 
 
+def _metadata_matches(actual, expected):
+    if not isinstance(actual, dict) or not isinstance(expected, dict):
+        return False
+    if set(actual) != set(expected):
+        return False
+    for key, exp_val in expected.items():
+        act_val = actual[key]
+        if act_val == exp_val:
+            continue
+        if (
+            isinstance(act_val, (int, float))
+            and isinstance(exp_val, (int, float))
+            and not isinstance(act_val, bool)
+            and not isinstance(exp_val, bool)
+        ):
+            if math.isclose(act_val, exp_val, rel_tol=1e-5, abs_tol=1e-5):
+                continue
+        return False
+    return True
+
+
 def _retrieved_document(index, identifier, text, metadata):
     expected = index._expected_chunks.get(identifier)
     if (
@@ -257,10 +279,11 @@ def _retrieved_document(index, identifier, text, metadata):
         or metadata.get("chunk_id") != identifier
         or metadata.get("asset_id") != index.asset_id
         or metadata.get("index_version") != index.index_version
-        or (text, metadata) != expected
+        or text != expected[0]
+        or not _metadata_matches(metadata, expected[1])
     ):
         raise IndexingError("Retrieved content does not match the requested asset index")
-    return Document(id=identifier, page_content=text, metadata=metadata)
+    return Document(id=identifier, page_content=text, metadata=expected[1])
 
 
 def _retrieval_rows(index, rows, metric, query_vector):
@@ -381,7 +404,8 @@ def _is_complete(index):
             ):
                 return False
             return all(
-                index._expected_chunks[chunk_id] == (content, metadata)
+                content == index._expected_chunks[chunk_id][0]
+                and _metadata_matches(metadata, index._expected_chunks[chunk_id][1])
                 for chunk_id, content, metadata in zip(
                     rows["ids"], rows["documents"], rows["metadatas"], strict=True,
                 )

@@ -16,6 +16,43 @@ revision_examples = [
         "question_type": "T/F",
         "action": "revise",
         "context": "The trial lasted six weeks and enrolled 24 adults.",
+        "current_question": {
+            **_example_question,
+            "question": "According to the source text, the trial was conducted over a total period of six weeks.",
+        },
+        "feedback": "Make the statement shorter while preserving its meaning.",
+        "history": [],
+        "result": {"status": "revised", "question": _example_question.copy(), "reason": None},
+    },
+    {
+        "question_type": "MCQ",
+        "action": "revise",
+        "context": "Photosynthesis takes place in chloroplasts, which contain chlorophyll.",
+        "current_question": {
+            "question": "Which cellular organelle named in the passage is described as containing chlorophyll?",
+            "question_type": "MCQ",
+            "options": ["A. Chloroplast", "B. Nucleus", "C. Ribosome", "D. Mitochondrion"],
+            "answer": "A",
+            "explanation": "Chloroplasts contain chlorophyll.",
+        },
+        "feedback": "Use a shorter, clearer question stem and keep the same choices.",
+        "history": [],
+        "result": {
+            "status": "revised",
+            "question": {
+                "question": "Which organelle contains chlorophyll?",
+                "question_type": "MCQ",
+                "options": ["A. Chloroplast", "B. Nucleus", "C. Ribosome", "D. Mitochondrion"],
+                "answer": "A",
+                "explanation": "Chloroplasts contain chlorophyll.",
+            },
+            "reason": None,
+        },
+    },
+    {
+        "question_type": "T/F",
+        "action": "revise",
+        "context": "The trial lasted six weeks and enrolled 24 adults.",
         "current_question": _example_question,
         "feedback": "Change the answer to False while keeping the statement.",
         "history": [],
@@ -81,7 +118,12 @@ complete object with question, question_type, options, answer, explanation. For 
 actual revision, use revised with reason null. If feedback conflicts with SOURCE or
 REQUESTED_TYPE, cannot be fulfilled from SOURCE, or needs no change, return unchanged
 with the exact CURRENT_QUESTION and a nonblank reason explaining why. Do not invent
-facts, silently comply with contradictory feedback, or make unrelated edits.""",
+facts, silently comply with contradictory feedback, or make unrelated edits.
+Choose status after comparing your final question object with CURRENT_QUESTION.
+If you changed any question, options, answer, or explanation text, status MUST be
+revised and reason MUST be null. unchanged means every field is identical, including
+the explanation; never return an improved question under unchanged. Supported clarity
+or concision feedback should produce a revised result when an improvement is possible.""",
         ),
         few_shot_prompt,
         ("human", _human_template),

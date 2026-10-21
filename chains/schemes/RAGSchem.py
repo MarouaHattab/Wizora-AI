@@ -1,7 +1,8 @@
+import math
 import re
 from typing import Annotated, Literal
 
-from pydantic import Field, StringConstraints, model_validator
+from pydantic import Field, StringConstraints, field_validator, model_validator
 
 from .QuestionSchem import StructuredResult
 
@@ -17,7 +18,7 @@ def _unique_ids(values):
 
 
 class QueryRewrite(StructuredResult):
-    query: RAGText = Field(description="A standalone retrieval question preserving the current request, with references resolved only from the supplied user history.")
+    query: RAGText = Field(description="A standalone retrieval question preserving the current request, with references resolved only from the supplied conversation history.")
 
 
 class EvidenceDecision(StructuredResult):
@@ -58,6 +59,14 @@ class ClaimVerdict(StructuredResult):
     claim_index: int = Field(ge=0)
     supported: bool
     reason: RAGText = Field(description="Concise explanation of entailment or the unsupported element; valid citation membership alone is insufficient.")
+
+    @field_validator("claim_index", mode="before")
+    @classmethod
+    def normalize_protobuf_integer(cls, value):
+        # Google's function-call protobuf transports every JSON number as a double.
+        if type(value) is float and math.isfinite(value) and value.is_integer():
+            return int(value)
+        return value
 
 
 class GroundingAssessment(StructuredResult):

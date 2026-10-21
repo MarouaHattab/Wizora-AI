@@ -37,6 +37,16 @@ def needs_context(question, history):
     question = question.strip()
     if re.match(r"^(?:and\s+)?(?:what about|how about|tell me more|elaborate|continue|compare them)\b", question, re.I):
         return True
+    if re.search(
+        r"\b(?:first|second|third|fourth|last|previous)\s+(?:one|ones|thing|stage|step|process|question|answer)\b"
+        r"|\b(?:you|we|i)\s+(?:mentioned|said|discussed|asked)\b"
+        r"|\b(?:earlier|previously|there)\b", question, re.I,
+    ):
+        return True
+    # These demonstratives name a previous conversational subject even when
+    # the follow-up also names the other side of a comparison explicitly.
+    if re.search(r"\b(?:this|that)\s+(?:location|process|step|stage|method|reaction)\b", question, re.I):
+        return True
     reference = re.search(r"\b(?:it|its|they|their|them|those|these|former|latter)\b", question, re.I)
     if reference is None:
         return bool(re.match(r"^(?:why|how|what)\b.*\b(?:this|that)\s+(?:work|matter|important|mean|happen)", question, re.I))
