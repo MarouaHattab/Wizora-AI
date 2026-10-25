@@ -458,6 +458,89 @@ class GradioUI(MultifileUI):
             "notice": feedback.get("revision_notice") or result.get("review_notice", ""),
         }
 
+    async def _stream_single_question_typewriter(
+        self, state, question_item, status_prefix="✍️ Writing refined question…"
+    ):
+        import asyncio
+        import re
+
+        draft = deepcopy(question_item.get("result", {}))
+        full_q = draft.get("question", "")
+        full_options = draft.get("options") or []
+        full_answer = str(draft.get("answer", ""))
+        full_exp = draft.get("explanation", "")
+
+        streaming_q = deepcopy(question_item)
+        streaming_draft = streaming_q.get("result", {})
+        streaming_draft.update(question="", options=[], answer="", explanation="")
+        state["question"] = streaming_q
+        state["question_status"] = status_prefix
+        yield self.render(state)
+
+        # 1. Stream question text word by word
+        q_tokens = re.findall(r"\S+|\n+", full_q)
+        for token in q_tokens:
+            if "\n" in token:
+                streaming_draft["question"] += token
+            else:
+                space = (
+                    " "
+                    if streaming_draft["question"]
+                    and not streaming_draft["question"].endswith(("\n", " "))
+                    else ""
+                )
+                streaming_draft["question"] += space + token
+            yield self.render(state)
+            await asyncio.sleep(0.015)
+
+        # 2. Stream options if present
+        if full_options:
+            state["question_status"] = "✍️ Writing answer options…"
+            curr_opts = []
+            for opt in full_options:
+                opt_str = str(opt)
+                opt_tokens = re.findall(r"\S+|\n+", opt_str)
+                curr_opt = ""
+                for token in opt_tokens:
+                    if "\n" in token:
+                        curr_opt += token
+                    else:
+                        space = " " if curr_opt and not curr_opt.endswith(("\n", " ")) else ""
+                        curr_opt += space + token
+                    streaming_draft["options"] = curr_opts + [curr_opt]
+                    yield self.render(state)
+                    await asyncio.sleep(0.012)
+                curr_opts.append(opt_str)
+            streaming_draft["options"] = full_options
+
+        # 3. Stream answer
+        if full_answer:
+            state["question_status"] = "✍️ Setting correct answer…"
+            streaming_draft["answer"] = full_answer
+            yield self.render(state)
+            await asyncio.sleep(0.04)
+
+        # 4. Stream explanation word by word
+        if full_exp:
+            state["question_status"] = "✍️ Writing explanation…"
+            exp_tokens = re.findall(r"\S+|\n+", full_exp)
+            for token in exp_tokens:
+                if "\n" in token:
+                    streaming_draft["explanation"] += token
+                else:
+                    space = (
+                        " "
+                        if streaming_draft["explanation"]
+                        and not streaming_draft["explanation"].endswith(("\n", " "))
+                        else ""
+                    )
+                    streaming_draft["explanation"] += space + token
+                yield self.render(state)
+                await asyncio.sleep(0.012)
+
+        # Restore exact full question object
+        state["question"] = deepcopy(question_item)
+
     async def _question(self, value, *, asset_id=None, question_type="MCQ", feedback=None):
         state = self._state(value)
         current = state.get("question", {})
@@ -486,7 +569,13 @@ class GradioUI(MultifileUI):
             if result.get("asset_id", state["asset_id"]) != state["asset_id"]:
                 raise BackendError("The backend returned a question for a different file", 502)
             current = self._question_result(response)
-            state["question"] = current
+            if feedback is not None and current.get("result") and feedback != "save":
+                async for output in self._stream_single_question_typewriter(
+                    state, current, status_prefix="✍️ Writing refined question…"
+                ):
+                    yield output
+            else:
+                state["question"] = current
             state["question_status"] = (
                 "✅ Question accepted and saved."
                 if current["status"] == "completed"
@@ -763,12 +852,14 @@ class GradioUI(MultifileUI):
             question = (question or "").strip()
             if not question:
                 raise BackendError("Please enter a question about the selected file", 422)
-            if start:
-                await self._ready(asset_id, state)
-                current = {"messages": [], "citations": []}
+            if start or not current.get("thread_id"):
+                effective_asset_id = asset_id or state.get("asset_id")
+                await self._ready(effective_asset_id, state)
+                current = {"messages": current.get("messages", []), "citations": current.get("citations", [])}
                 state["qa"] = current
-            elif current.get("status") != "completed" or not current.get("thread_id"):
-                raise BackendError("Start a Q&A session before sending a follow-up question", 409)
+                start = not bool(current.get("thread_id"))
+            elif current.get("status") != "completed":
+                raise BackendError("Please wait for the current answer to complete", 409)
             current.update(status="running", pending={"question": question, "text": ""})
             state["qa_status"] = "🔄 Generating a source-grounded answer…"
             yield self.render(state)
@@ -781,7 +872,24 @@ class GradioUI(MultifileUI):
                 current["thread_id"] = event["thread_id"]
                 kind, data = event["event"], event["data"]
                 if kind == "text_delta":
-                    current["pending"]["text"] += data.get("text", "")
+                    import asyncio
+                    import re
+
+                    delta_text = data.get("text", "")
+                    tokens = re.findall(r"\S+|\n+", delta_text)
+                    for token in tokens:
+                        if "\n" in token:
+                            current["pending"]["text"] += token
+                        else:
+                            space = (
+                                " "
+                                if current["pending"]["text"]
+                                and not current["pending"]["text"].endswith(("\n", " "))
+                                else ""
+                            )
+                            current["pending"]["text"] += space + token
+                        yield self.render(state)
+                        await asyncio.sleep(0.015)
                 elif kind == "completed":
                     completed = data
                     state["qa_status"] = "🔄 Finishing answer…"

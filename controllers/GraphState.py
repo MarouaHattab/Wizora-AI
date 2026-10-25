@@ -102,3 +102,4 @@ class QuestionAnswerState(QuestionAnswerRequiredState, total=False):
     answer_citations: list[dict]
     grounding_status: Literal["model_assessed", "not_applicable", "rejected"]
     rag_diagnostics: dict
+    conversation_answer: str | None

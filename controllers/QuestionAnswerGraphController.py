@@ -41,6 +41,87 @@ REFUSAL = "Seems that your question is not related to the uploaded content. I ca
 INSUFFICIENT = "The supplied source evidence is insufficient to answer this question reliably."
 UNVERIFIED = "I could not verify an answer against the supplied source evidence. Please narrow the question or provide additional source material."
 
+def _handle_conversational_meta_query(question: str, messages: list) -> str | None:
+    import re
+    from langchain_core.messages import AIMessage, HumanMessage
+
+    if not isinstance(question, str) or not question.strip():
+        return None
+    q = question.strip()
+
+    prev_q_patterns = [
+        r"\b(?:what\s+was|repeat|remind\s+me|tell\s+me)\b.*\b(?:my|the)?\s*(?:previous|last|earlier|first)\s+question\b",
+        r"\bwhat\s+did\s+i\s+(?:just\s+)?(?:ask|say)\b",
+        r"\bwhat\s+was\s+i\s+asking\b",
+        r"\bdo\s+you\s+remember\b.*\b(?:what\s+i\s+asked|my\s+question)\b",
+    ]
+    list_q_patterns = [
+        r"\b(?:what|which)\s+(?:questions\s+)?(?:did\s+i\s+ask|have\s+i\s+asked)\b",
+        r"\blist\s+(?:all\s+)?(?:my\s+)?questions\b",
+    ]
+    prev_a_patterns = [
+        r"\b(?:what\s+was|repeat|remind\s+me|tell\s+me)\b.*\b(?:your|the)?\s*(?:previous|last|earlier)\s+(?:answer|response)\b",
+        r"\bwhat\s+did\s+you\s+(?:just\s+)?(?:answer|say|tell\s+me|respond)\b",
+        r"\brepeat\s+(?:your\s+)?(?:last\s+)?(?:answer|response|what\s+you\s+said)\b",
+    ]
+    recap_patterns = [
+        r"\b(?:summarize|recap)\b.*\b(?:our\s+)?(?:conversation|chat|discussion)\b",
+        r"\bwhat\s+(?:did\s+we|have\s+we)\s+(?:talk\s+about|discussed|covered)\b",
+        r"\bdo\s+you\s+remember\b.*\b(?:what\s+we\s+talked\s+about|our\s+conversation)\b",
+    ]
+
+    is_prev_q = any(re.search(p, q, re.I) for p in prev_q_patterns)
+    is_list_q = any(re.search(p, q, re.I) for p in list_q_patterns)
+    is_prev_a = any(re.search(p, q, re.I) for p in prev_a_patterns)
+    is_recap = any(re.search(p, q, re.I) for p in recap_patterns)
+
+    if not (is_prev_q or is_list_q or is_prev_a or is_recap):
+        return None
+
+    turns = []
+    current_human = None
+    for msg in messages:
+        if isinstance(msg, HumanMessage):
+            current_human = msg
+        elif isinstance(msg, AIMessage) and current_human is not None:
+            human_text = current_human.content if isinstance(current_human.content, str) else str(current_human.content)
+            ai_text = msg.content if isinstance(msg.content, str) else str(msg.content)
+            turns.append((human_text.strip(), ai_text.strip()))
+            current_human = None
+
+    if not turns:
+        return "You haven't asked any previous questions in this session yet. Feel free to ask any question about the uploaded document!"
+
+    if is_prev_q:
+        is_first = bool(re.search(r"\bfirst\b", q, re.I))
+        target_q, target_a = turns[0] if is_first else turns[-1]
+        label = "first" if is_first else "previous"
+        a_clean = target_a.split("\n\nSources:")[0].strip()
+        if len(a_clean) > 300:
+            a_clean = a_clean[:297].rstrip() + "…"
+        return f'Your {label} question was:\n\n> **"{target_q}"**\n\nIn response, I explained:\n{a_clean}'
+
+    if is_prev_a:
+        prev_q, prev_a = turns[-1]
+        a_clean = prev_a.split("\n\nSources:")[0].strip()
+        return f'In response to your question *"{prev_q}"*, my previous answer was:\n\n{a_clean}'
+
+    if is_list_q:
+        items = [f'{i}. "{q_text}"' for i, (q_text, _) in enumerate(turns, 1)]
+        return "Here are the questions you have asked so far:\n\n" + "\n".join(items)
+
+    if is_recap:
+        items = []
+        for i, (q_text, a_text) in enumerate(turns, 1):
+            a_clean = a_text.split("\n\nSources:")[0].strip()
+            if len(a_clean) > 180:
+                a_clean = a_clean[:177].rstrip() + "…"
+            items.append(f'**Turn {i}:**\n- **Question:** "{q_text}"\n- **Answer:** {a_clean}')
+        return "Here is a summary of our conversation so far:\n\n" + "\n\n".join(items)
+
+    return None
+
+
 
 def _question_text(state):
     messages = canonical_messages(state)
@@ -124,6 +205,7 @@ def _query_start(state):
         "rag_diagnostics": {"model_calls": [], "rewrite": "unnecessary"},
         "video_targeted_attempted": False,
         "video_processing_notice": "",
+        "conversation_answer": None,
     }
 
 
@@ -175,6 +257,13 @@ def _unresolved_query(delta):
 
 def understand_query(state: QuestionAnswerState, config: RunnableConfig = None):
     delta = _query_start(state)
+    conv_ans = _handle_conversational_meta_query(_question_text(state), canonical_messages(state)[:-1])
+    if conv_ans is not None:
+        return {
+            **delta,
+            "conversation_answer": conv_ans,
+            "rag_diagnostics": {"rewrite": "conversational", "model_calls": []},
+        }
     if not _rewrite_needed(state):
         return delta
     if not _history(state):
@@ -191,6 +280,13 @@ def understand_query(state: QuestionAnswerState, config: RunnableConfig = None):
 
 async def understand_query_async(state: QuestionAnswerState, config: RunnableConfig = None):
     delta = _query_start(state)
+    conv_ans = _handle_conversational_meta_query(_question_text(state), canonical_messages(state)[:-1])
+    if conv_ans is not None:
+        return {
+            **delta,
+            "conversation_answer": conv_ans,
+            "rag_diagnostics": {"rewrite": "conversational", "model_calls": []},
+        }
     if not _rewrite_needed(state):
         return delta
     if not _history(state):
@@ -206,6 +302,8 @@ async def understand_query_async(state: QuestionAnswerState, config: RunnableCon
 
 
 def _retrieval_work(state, corrective):
+    if state.get("conversation_answer"):
+        return [], state.get("index_version", ""), None
     documents = load_asset_documents(state["asset_id"], context=state["context"])
     index = ensure_asset_index(state["asset_id"], state["context"], settings, documents=documents)
     if corrective and state.get("index_version") != index.index_version:
@@ -616,6 +714,22 @@ async def validate_grounding_async(state: QuestionAnswerState, config: RunnableC
     return _grounding_delta(state, assessment, call)
 
 
+def conversation_response(state: QuestionAnswerState):
+    text = state.get("conversation_answer", "")
+    return {
+        **message_delta(state, text, settings),
+        "answer_status": "supported",
+        "answer_citations": [],
+        "grounding_status": "not_applicable",
+        "answer_draft": None,
+        "rag_diagnostics": _diagnostics(state, conversational=True),
+    }
+
+
+def query_router(state):
+    return "conversation" if state.get("conversation_answer") else "retrieve"
+
+
 def off_topic_response(state: QuestionAnswerState):
     decision = _decision(state)
     text = REFUSAL if decision.status == "off_topic" else INSUFFICIENT
@@ -650,8 +764,14 @@ def _build_graph(answer_name):
         "validate_grounding", RunnableLambda(validate_grounding, afunc=validate_grounding_async)
     )
     graph.add_node("off_topic_response", off_topic_response)
+    graph.add_node("conversation_response", conversation_response)
     graph.add_edge(START, "understand_query")
-    graph.add_edge("understand_query", "retrieve")
+    graph.add_conditional_edges(
+        "understand_query",
+        query_router,
+        {"conversation": "conversation_response", "retrieve": "retrieve"},
+    )
+    graph.add_edge("conversation_response", END)
     graph.add_edge("retrieve", "assess_evidence")
     graph.add_conditional_edges(
         "assess_evidence",

@@ -494,6 +494,90 @@ class MultifileUI:
             )
         return self.render_questions(state)
 
+    async def _stream_question_typewriter(
+        self, state, bank, target_q, status_prefix="✍️ Writing generated question…"
+    ):
+        import asyncio
+        import re
+
+        draft = deepcopy(target_q.get("result", {}))
+        full_q = draft.get("question", "")
+        full_options = draft.get("options") or []
+        full_answer = str(draft.get("answer", ""))
+        full_exp = draft.get("explanation", "")
+
+        state["question_bank"] = bank
+        streaming_q = deepcopy(target_q)
+        streaming_draft = streaming_q.get("result", {})
+        streaming_draft.update(question="", options=[], answer="", explanation="")
+        state["question"] = streaming_q
+        state["question_status"] = status_prefix
+        yield self.render_questions(state)
+
+        # 1. Stream question text word by word
+        q_tokens = re.findall(r"\S+|\n+", full_q)
+        for token in q_tokens:
+            if "\n" in token:
+                streaming_draft["question"] += token
+            else:
+                space = (
+                    " "
+                    if streaming_draft["question"]
+                    and not streaming_draft["question"].endswith(("\n", " "))
+                    else ""
+                )
+                streaming_draft["question"] += space + token
+            yield self.render_questions(state)
+            await asyncio.sleep(0.015)
+
+        # 2. Stream options if present
+        if full_options:
+            state["question_status"] = "✍️ Writing answer options…"
+            curr_opts = []
+            for opt in full_options:
+                opt_str = str(opt)
+                opt_tokens = re.findall(r"\S+|\n+", opt_str)
+                curr_opt = ""
+                for token in opt_tokens:
+                    if "\n" in token:
+                        curr_opt += token
+                    else:
+                        space = " " if curr_opt and not curr_opt.endswith(("\n", " ")) else ""
+                        curr_opt += space + token
+                    streaming_draft["options"] = curr_opts + [curr_opt]
+                    yield self.render_questions(state)
+                    await asyncio.sleep(0.012)
+                curr_opts.append(opt_str)
+            streaming_draft["options"] = full_options
+
+        # 3. Stream answer
+        if full_answer:
+            state["question_status"] = "✍️ Setting correct answer…"
+            streaming_draft["answer"] = full_answer
+            yield self.render_questions(state)
+            await asyncio.sleep(0.04)
+
+        # 4. Stream explanation word by word
+        if full_exp:
+            state["question_status"] = "✍️ Writing explanation…"
+            exp_tokens = re.findall(r"\S+|\n+", full_exp)
+            for token in exp_tokens:
+                if "\n" in token:
+                    streaming_draft["explanation"] += token
+                else:
+                    space = (
+                        " "
+                        if streaming_draft["explanation"]
+                        and not streaming_draft["explanation"].endswith(("\n", " "))
+                        else ""
+                    )
+                    streaming_draft["explanation"] += space + token
+                yield self.render_questions(state)
+                await asyncio.sleep(0.012)
+
+        # Restore exact full question object
+        state["question"] = deepcopy(target_q)
+
     async def start_question_set(self, asset_id, question_type, difficulty, count, value):
         state = self._state(value)
         state.update(
@@ -521,7 +605,11 @@ class MultifileUI:
                     )
                 if result.get("question_type", question_type) != question_type:
                     raise BackendError("The backend returned a different question type", 502)
-            state.update(question_bank=bank, question=deepcopy(bank[0]) if bank else {})
+            if bank:
+                async for output in self._stream_question_typewriter(state, bank, bank[0]):
+                    yield output
+            else:
+                state.update(question_bank=[], question={})
             missing = max(0, int(count) - len(bank))
             state["question_status"] = (
                 f"{'⚠️' if missing else '✅'} {len(bank)} of {int(count)} requested questions ready."

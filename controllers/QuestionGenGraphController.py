@@ -64,10 +64,16 @@ def _generation_inputs(state, context=None, previous=None):
     }
 
 
-def _generation_delta(result, state):
+def _generation_delta(result, state, override_difficulty=None):
     if result.status == "insufficient_source":
         raise InsufficientSourceError(result.reason)
-    question = validate_question_draft(state, result.question)
+    eval_state = dict(state)
+    target_difficulty = override_difficulty or getattr(result.question, "difficulty", None)
+    if target_difficulty in {"easy", "medium", "hard"}:
+        eval_state["difficulty"] = target_difficulty
+        if hasattr(result.question, "difficulty"):
+            result.question.difficulty = target_difficulty
+    question = validate_question_draft(eval_state, result.question)
     return {
         **question.model_dump(),
         "workflow_action": None,
@@ -113,7 +119,10 @@ def _candidate_issue(state, result, understanding):
         return "Choose another educational concept supported by the source. " + (
             result.reason or ""
         )
-    question = validate_question_draft(state, result.question)
+    eval_state = dict(state)
+    if hasattr(result.question, "difficulty") and result.question.difficulty in {"easy", "medium", "hard"}:
+        eval_state["difficulty"] = result.question.difficulty
+    question = validate_question_draft(eval_state, result.question)
     return originality_issue(
         question.question, understanding, state.get("previous_questions") or []
     ) or grounding_issue(question, understanding)
@@ -125,7 +134,10 @@ def _candidate_review(state, result, part):
         for old in state.get("previous_questions") or []
     ):
         return None
-    question = validate_question_draft(state, result.question)
+    eval_state = dict(state)
+    if hasattr(result.question, "difficulty") and result.question.difficulty in {"easy", "medium", "hard"}:
+        eval_state["difficulty"] = result.question.difficulty
+    question = validate_question_draft(eval_state, result.question)
     return {
         "context": part["context"],
         "previous_questions": state.get("previous_questions") or [],
@@ -207,24 +219,60 @@ def _prepared_generation_delta(state, result, prepared, index, part, critic):
     ):
         return None
     validation = _candidate_assessment(state, result, prepared, part, critic)
-    if state.get("require_assessed_difficulty") and validation["checks"]["difficulty"] != "passed":
+
+    # Check if fundamental factual/source validity checks failed
+    other_failed = [
+        name for name, status in validation["checks"].items()
+        if status == "failed" and name != "difficulty"
+    ]
+    if other_failed:
         return None
-    if "failed" in validation["checks"].values():
-        return None
+
+    # Adaptive Difficulty handling:
+    difficulty_check = validation["checks"].get("difficulty")
+    adapted_difficulty = None
+    adaptive_note = ""
+
+    if state.get("require_assessed_difficulty") and difficulty_check != "passed":
+        assessed = validation.get("assessed_difficulty")
+        if assessed in {"easy", "medium"} and state.get("difficulty") == "hard":
+            adapted_difficulty = assessed
+            adaptive_note = (
+                f" (Note: Adapted to '{assessed}' difficulty because the source passage "
+                f"lacks multiple interacting premises for '{state.get('difficulty')}')."
+            )
+            validation["warnings"].append(
+                f"Difficulty adapted from {state.get('difficulty')} to {assessed}: source evidence supports {assessed} demand."
+            )
+            validation["checks"]["difficulty"] = "passed"
+        else:
+            return None
+    elif difficulty_check == "failed":
+        assessed = validation.get("assessed_difficulty")
+        if assessed in {"easy", "medium", "hard"}:
+            adapted_difficulty = assessed
+            validation["checks"]["difficulty"] = "passed"
+        else:
+            return None
+
     count = len(prepared["source_chunks"])
     note = prepared["context_note"]
     if count > 1:
         note += f" This question uses source part {index + 1} of {count}; other parts are retained for subsequent questions."
+    if adaptive_note:
+        note += adaptive_note
+
+    delta = _generation_delta(result, state, override_difficulty=adapted_difficulty)
     return {
         **prepared,
-        **_generation_delta(result, state),
+        **delta,
         "source_context": part["context"],
         "source_citations": part["citations"],
         "context_note": note,
         "critic_feedback": critic,
         "previous_questions": state.get("previous_questions") or [],
         "validation": validation,
-        "review_required": validation["status"] != "validated",
+        "review_required": True if adapted_difficulty else validation["status"] != "validated",
     }
 
 
@@ -253,8 +301,10 @@ def _generation_exhausted(prepared, history, repairs):
         )
     else:
         covered = len({item["source_part"] for item in history})
+        reasons = [item.get("rejection_reason") for item in history if item.get("rejection_reason")]
+        detail_hint = f" ({reasons[-1]})" if reasons else ""
         error = InsufficientSourceError(
-            f"A new, source-supported question could not be validated after {len(history)} bounded candidate attempts using {covered} of {len(prepared['source_chunks'])} retained source parts. Saved questions were excluded; try another question type or source section."
+            f"The selected material is insufficient to generate a validated question after {len(history)} attempt(s) across {covered} source part(s).{detail_hint} Try selecting another source section or choosing an easier difficulty."
         )
     error.generation_diagnostics = _generation_diagnostics(
         history, repairs, _candidate_attempt_limit(prepared)

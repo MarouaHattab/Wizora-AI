@@ -377,7 +377,16 @@ def create_gradio_interface(client=None):
                         label="Standard ZIP Download", interactive=False
                     )
             gr.Markdown(
-                "---\n### 💡 How to Use\n1. **Upload:** Add text, PDF, DOCX, audio and video files together, choose visual processing, then process. Wizora automatically builds one learning context with source citations.\n2. **Review:** Follow each file’s status and inspect extracted content, citations and Job Results JSON.\n3. **Questions:** Choose type, difficulty and count, generate, then select each question for feedback, refinement and save.\n4. **Summary:** Create main points and a detailed summary, revise, then accept/save.\n5. **Chat:** Ask questions about the active learning context."
+                "---\n### 💡 How to Use\n\n"
+                "- **Upload:** Add text, PDF, DOCX, audio and video files together, choose visual processing, then process. Wizora automatically builds one learning context with source citations.\n"
+                "- **Review:** Follow each file’s status and inspect extracted content, citations and Job Results JSON.\n"
+                "- **Questions & Difficulty:** Choose type, difficulty and count, generate, then select each question for feedback, refinement and save.\n"
+                "  - 🟢 **Easy:** Recall of a single explicit source fact or definition.\n"
+                "  - 🟡 **Medium:** Application of a rule, formula, or relationship in a new context.\n"
+                "  - 🔴 **Hard:** Multi-step reasoning combining at least two distinct interacting source premises.\n"
+                "  - ⚡ **Adaptive Fallback:** If the selected material lacks multiple interacting premises for Hard, Wizora automatically adapts it to a verified Medium question with an explanatory notice.\n"
+                "- **Summary:** Create main points and a detailed summary, revise, then accept/save.\n"
+                "- **Chat:** Ask questions about the active learning context."
             )
         outputs = [
             state,

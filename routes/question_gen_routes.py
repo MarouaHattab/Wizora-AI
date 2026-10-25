@@ -673,11 +673,15 @@ async def start_question_generation_session(request: QuestionGenerationRequest):
                         reason = error.detail.get("reason")
                         if isinstance(reason, str) and reason not in warnings:
                             warnings.append(reason)
+                    elif error.detail.get("status") == "insufficient_source":
+                        reason = error.detail.get("reason")
+                        if isinstance(reason, str) and reason not in warnings:
+                            warnings.append(f"ℹ️ Material notice: {reason}")
                 continue
             state = response.get("current_state", response.get("final_state", {}))
             try:
                 candidate = validate_question_draft(
-                    {"question_type": request.question_type, "difficulty": request.difficulty},
+                    {"question_type": request.question_type, "difficulty": state.get("difficulty", request.difficulty)},
                     {key: state[key] for key in Question.model_fields if key in state},
                 )
                 if state.get("asset_id", request.asset_id) != request.asset_id:
