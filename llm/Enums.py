@@ -1,11 +1,5 @@
-from enum import Enum
+import sys
+from importlib import import_module
 
-class LLMEnums(Enum):
-    OLLAMA = "OLLAMA"
-    GOOGLE_GENAI = "GOOGLE_GENAI"
-    GROQ = "GROQ"
-    
-class EmbeddingEnums(Enum):
-    LOCAL_EMBEDDING = "LOCAL_EMBEDDING"
-    HUGGINGFACE = "HUGGINGFACE"    
-
+# Share the module object so legacy patches and cached resources remain identical.
+sys.modules[__name__] = import_module("llm.provider_types")

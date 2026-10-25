@@ -1,7 +1,6 @@
 import json
 
-from langchain.prompts import ChatPromptTemplate, FewShotChatMessagePromptTemplate
-
+from langchain_core.prompts import ChatPromptTemplate, FewShotChatMessagePromptTemplate
 
 _example_question = {
     "question": "The trial lasted six weeks.",
@@ -78,6 +77,7 @@ revision_examples = [
 ]
 
 _human_template = """REQUESTED_TYPE: {question_type}
+REQUESTED_DIFFICULTY: {difficulty}
 ACTION: {action}
 <SOURCE>
 {context}
@@ -91,6 +91,11 @@ ACTION: {action}
 <FEEDBACK>
 {feedback}
 </FEEDBACK>"""
+
+for example in revision_examples:
+    example["difficulty"] = "medium"
+    example["current_question"]["difficulty"] = "medium"
+    example["result"]["question"]["difficulty"] = "medium"
 
 few_shot_prompt = FewShotChatMessagePromptTemplate(
     example_prompt=ChatPromptTemplate.from_messages(
@@ -121,13 +126,14 @@ and style preferences. FEEDBACK may be text or a structured review with issues.
 For refine, correct only the supplied critic issues. For revise, apply supported user
 edits and any compatible critic findings. Preserve unaffected parts and compatible
 prior preferences, and do not add outside facts or unsupported comparisons. Keep the
-requested type.
+requested type and REQUESTED_DIFFICULTY, including the difficulty field. Keep the
+assessment original: never reproduce a source exercise or merely change its numbers.
 MCQ has exactly four distinct, parallel choices labelled A. through D., plausible
 distractors, and exactly one correct answer A, B, C, or D. T/F has options null and
 answer exactly True or False as a JSON string. False requires an explicit source
 contradiction; omission is not disproof. Explain the answer using SOURCE.
 Return only a JSON RevisionResult: status, question, reason. question is always a
-complete object with question, question_type, options, answer, explanation. For an
+complete object with question, question_type, options, answer, explanation, difficulty. For an
 actual revision, use revised with reason null. If feedback conflicts with SOURCE or
 REQUESTED_TYPE, cannot be fulfilled from SOURCE, or needs no change, return unchanged
 with the exact CURRENT_QUESTION and a nonblank reason explaining why. Do not invent

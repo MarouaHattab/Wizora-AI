@@ -7,8 +7,8 @@ from langchain_core.messages import AIMessage, BaseMessageChunk, HumanMessage, R
 from langgraph.graph.message import add_messages
 from pydantic import BaseModel
 
-from chains.contracts import text_output
-from chains.schemes.QuestionSchem import Feedback
+from chains import text_output
+from schemas import Feedback
 
 
 def _encoded(value):
@@ -16,6 +16,7 @@ def _encoded(value):
         if isinstance(item, BaseModel):
             return item.model_dump()
         raise TypeError("History contains an unsupported value")
+
     return json.dumps(value, sort_keys=True, ensure_ascii=False, default=supported)
 
 
@@ -36,7 +37,13 @@ def _legacy_messages(values):
             role = value.get("type", value.get("role"))
             if not isinstance(role, str):
                 continue
-            cls = HumanMessage if role in {"human", "user"} else AIMessage if role in {"ai", "assistant"} else None
+            cls = (
+                HumanMessage
+                if role in {"human", "user"}
+                else AIMessage
+                if role in {"ai", "assistant"}
+                else None
+            )
             if cls is None:
                 continue
             try:
@@ -76,7 +83,7 @@ def _turns(messages):
 
 
 def message_delta(state, answer, config):
-    from chains.contracts import TextOutputError
+    from chains import TextOutputError
 
     messages = canonical_messages(state)
     if not messages or not isinstance(messages[-1], HumanMessage):
@@ -86,7 +93,10 @@ def message_delta(state, answer, config):
     latest = turns[-1]
     max_messages = config.QA_RETENTION_MESSAGES
     max_characters = config.QA_RETENTION_CHARACTERS
-    size = lambda turn: sum(len(message.content) for message in turn)
+
+    def size(turn):
+        return sum(len(message.content) for message in turn)
+
     if len(latest) > max_messages or size(latest) > max_characters:
         raise TextOutputError("The complete turn exceeds the configured history retention budget")
     selected = [latest]
@@ -107,7 +117,10 @@ def message_delta(state, answer, config):
     return {
         "messages": [*remove, response],
         "conversation_history": [],
-        "history_trimmed": (state.get("history_trimmed", 0) if type(state.get("history_trimmed", 0)) is int else 0) + len(remove),
+        "history_trimmed": (
+            state.get("history_trimmed", 0) if type(state.get("history_trimmed", 0)) is int else 0
+        )
+        + len(remove),
         "state_version": 4,
     }
 
@@ -128,7 +141,9 @@ def human_feedback_value(state):
     value = state.get("feedback", "")
     if not isinstance(value, str):
         return ""
-    return "auto" if state.get("state_version") != 4 and _legacy_critic(value) is not None else value
+    return (
+        "auto" if state.get("state_version") != 4 and _legacy_critic(value) is not None else value
+    )
 
 
 def critic_feedback_value(state):
@@ -162,20 +177,34 @@ def _history(state):
         if legacy is not None:
             feedback, critic = "auto", legacy.model_dump()
         draft = entry.get("question", entry.get("draft_preview", ""))
-        preview = draft.get("question", "") if isinstance(draft, Mapping) else draft if isinstance(draft, str) else ""
+        preview = (
+            draft.get("question", "")
+            if isinstance(draft, Mapping)
+            else draft
+            if isinstance(draft, str)
+            else ""
+        )
         preview = preview if isinstance(preview, str) else ""
-        review_id = _identifier(entry.get("review_id") or entry.get("id"), "legacy-" + _digest([position, entry]))
+        review_id = _identifier(
+            entry.get("review_id") or entry.get("id"), "legacy-" + _digest([position, entry])
+        )
         asset_id = _identifier(entry.get("asset_id", state.get("asset_id")), None)
         result.pop(review_id, None)
-        result[review_id] = _compact_record({
-            "id": review_id, "review_id": review_id,
-            "asset_id": asset_id,
-            "human_feedback": feedback,
-            "critic_feedback": critic if isinstance(critic, Mapping) else None,
-            "status": entry.get("status", "revised") if entry.get("status") in ("revised", "unchanged") else "revised",
-            "reason": entry.get("reason") if isinstance(entry.get("reason"), str) else None,
-            "draft_hash": _identifier(entry.get("draft_hash"), _digest(draft)), "draft_preview": preview[:256],
-        })
+        result[review_id] = _compact_record(
+            {
+                "id": review_id,
+                "review_id": review_id,
+                "asset_id": asset_id,
+                "human_feedback": feedback,
+                "critic_feedback": critic if isinstance(critic, Mapping) else None,
+                "status": entry.get("status", "revised")
+                if entry.get("status") in ("revised", "unchanged")
+                else "revised",
+                "reason": entry.get("reason") if isinstance(entry.get("reason"), str) else None,
+                "draft_hash": _identifier(entry.get("draft_hash"), _digest(draft)),
+                "draft_preview": preview[:256],
+            }
+        )
     return list(result.values())
 
 
@@ -186,10 +215,12 @@ def _compact_record(record, budget=3072):
         text = critic.get("feedback", "")
         record["critic_feedback"] = {
             "acceptable": critic.get("acceptable") is True,
-            "verdict": critic.get("verdict") if critic.get("verdict") in {"acceptable", "needs_revision"} else (
-                "acceptable" if critic.get("acceptable") is True else "needs_revision"
-            ),
-            "issue_count": len(critic.get("issues", [])) if isinstance(critic.get("issues"), list) else 0,
+            "verdict": critic.get("verdict")
+            if critic.get("verdict") in {"acceptable", "needs_revision"}
+            else ("acceptable" if critic.get("acceptable") is True else "needs_revision"),
+            "issue_count": len(critic.get("issues", []))
+            if isinstance(critic.get("issues"), list)
+            else 0,
             "feedback_hash": _digest(critic),
             "feedback_preview": text[:256] if isinstance(text, str) else "",
         }
@@ -198,14 +229,19 @@ def _compact_record(record, budget=3072):
         if isinstance(value, str):
             record[key] = value[:limit]
     while len(_encoded(record)) > budget:
-        candidates = [key for key in ("human_feedback", "reason", "draft_preview") if isinstance(record.get(key), str) and len(record[key]) > 16]
+        candidates = [
+            key
+            for key in ("human_feedback", "reason", "draft_preview")
+            if isinstance(record.get(key), str) and len(record[key]) > 16
+        ]
         if candidates:
             key = max(candidates, key=lambda item: len(record[item]))
-            record[key] = record[key][:len(record[key]) // 2]
+            record[key] = record[key][: len(record[key]) // 2]
         elif record.get("critic_feedback") is not None:
             record["critic_feedback"] = None
         else:
-            from chains.contracts import ChainInputError
+            from chains import ChainInputError
+
             raise ChainInputError("The revision history budget cannot hold a source reference")
     return record
 
@@ -215,7 +251,10 @@ def _requirements(state):
     if not isinstance(values, list):
         values = []
     if not values:
-        values = [{"review_id": entry["review_id"], "feedback": entry["human_feedback"]} for entry in _history(state)]
+        values = [
+            {"review_id": entry["review_id"], "feedback": entry["human_feedback"]}
+            for entry in _history(state)
+        ]
     result = []
     seen = set()
     for value in values:
@@ -231,7 +270,10 @@ def _requirements(state):
             "feedback": feedback,
         }
         if value.get("truncated") is True:
-            requirement.update(truncated=True, feedback_hash=_identifier(value.get("feedback_hash"), _digest(feedback)))
+            requirement.update(
+                truncated=True,
+                feedback_hash=_identifier(value.get("feedback_hash"), _digest(feedback)),
+            )
         result.append(requirement)
     return result
 
@@ -243,7 +285,9 @@ def _bounded_requirements(values, budget):
         if not values:
             break
         item = dict(values[index])
-        item_budget = max(budget // 2, min(512, budget)) if not selected and len(values) > 1 else budget
+        item_budget = (
+            max(budget // 2, min(512, budget)) if not selected and len(values) > 1 else budget
+        )
         while len(_encoded([entry for _, entry in selected] + [item])) > item_budget:
             feedback = item["feedback"]
             if len(feedback) <= 32:
@@ -258,17 +302,24 @@ def _bounded_requirements(values, budget):
 
 def normalize_review_state(state):
     return {
-        **state, "human_feedback_text": human_feedback_value(state),
-        "critic_feedback": critic_feedback_value(state), "history": _history(state),
+        **state,
+        "human_feedback_text": human_feedback_value(state),
+        "critic_feedback": critic_feedback_value(state),
+        "history": _history(state),
         "revision_requirements": _requirements(state),
     }
 
 
 def revision_context(state, config):
-    requirements = _bounded_requirements(_requirements(state), config.REVISION_CONTEXT_CHARACTERS // 2)
-    records = _history(state)[-config.REVISION_CONTEXT_RECORDS:]
+    requirements = _bounded_requirements(
+        _requirements(state), config.REVISION_CONTEXT_CHARACTERS // 2
+    )
+    records = _history(state)[-config.REVISION_CONTEXT_RECORDS :]
     context = ([{"retained_requirements": requirements}] if requirements else []) + records
-    while len(context) > (1 if requirements else 0) and len(_encoded(context)) > config.REVISION_CONTEXT_CHARACTERS:
+    while (
+        len(context) > (1 if requirements else 0)
+        and len(_encoded(context)) > config.REVISION_CONTEXT_CHARACTERS
+    ):
         context.pop(1 if requirements else 0)
     return context
 
@@ -277,27 +328,44 @@ def revision_delta(state, config, *, draft, status, reason=None, critic=None):
     if hasattr(draft, "model_dump"):
         draft = draft.model_dump()
     if not isinstance(draft, (Mapping, str)):
-        from chains.contracts import StructuredOutputError
+        from chains import StructuredOutputError
+
         raise StructuredOutputError("A revision draft must be a question or text")
     preview = draft.get("question", "") if isinstance(draft, Mapping) else draft
-    review_id = _identifier(state.get("feedback_review_id"), "legacy-" + _digest([human_feedback_value(state), draft]))
+    review_id = _identifier(
+        state.get("feedback_review_id"), "legacy-" + _digest([human_feedback_value(state), draft])
+    )
     critic = critic or critic_feedback_value(state)
     if isinstance(critic, Feedback):
         critic = critic.model_dump()
-    record = _compact_record({
-        "id": review_id, "review_id": review_id,
-        "asset_id": _identifier(state.get("asset_id"), None),
-        "human_feedback": human_feedback_value(state), "critic_feedback": critic,
-        "status": status, "reason": reason, "draft_hash": _digest(draft), "draft_preview": preview[:256],
-    }, min(3072, config.REVISION_HISTORY_CHARACTERS - 2))
-    history = [_compact_record(entry, min(3072, config.REVISION_HISTORY_CHARACTERS - 2)) for entry in _history(state) if entry["id"] != review_id] + [record]
-    history = history[-config.REVISION_HISTORY_LIMIT:]
+    record = _compact_record(
+        {
+            "id": review_id,
+            "review_id": review_id,
+            "asset_id": _identifier(state.get("asset_id"), None),
+            "human_feedback": human_feedback_value(state),
+            "critic_feedback": critic,
+            "status": status,
+            "reason": reason,
+            "draft_hash": _digest(draft),
+            "draft_preview": preview[:256],
+        },
+        min(3072, config.REVISION_HISTORY_CHARACTERS - 2),
+    )
+    history = [
+        _compact_record(entry, min(3072, config.REVISION_HISTORY_CHARACTERS - 2))
+        for entry in _history(state)
+        if entry["id"] != review_id
+    ] + [record]
+    history = history[-config.REVISION_HISTORY_LIMIT :]
     while len(history) > 1 and len(_encoded(history)) > config.REVISION_HISTORY_CHARACTERS:
         history.pop(0)
     requirements = _requirements(state)
     feedback = human_feedback_value(state).strip()
     if feedback and feedback.casefold() not in {"auto", "save", "refine", "accept"}:
-        requirements = [item for item in requirements if item["feedback"].casefold() != feedback.casefold()]
+        requirements = [
+            item for item in requirements if item["feedback"].casefold() != feedback.casefold()
+        ]
         requirements.append({"review_id": review_id, "feedback": feedback})
     requirements = _bounded_requirements(requirements, config.REVISION_REQUIREMENTS_CHARACTERS)
     return {"history": history, "revision_requirements": requirements, "state_version": 4}

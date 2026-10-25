@@ -1,12 +1,11 @@
 from typing import Annotated, Literal
-from typing_extensions import TypedDict
 
 from langchain_core.documents import Document
 from langchain_core.messages import AnyMessage, BaseMessage
+from typing_extensions import TypedDict
 
-from chains.schemes.QuestionSchem import Feedback
-from chains.schemes.RAGSchem import EvidenceDecision, GroundedAnswer, GroundingAssessment
 from helper.workflow_history import merge_messages
+from schemas import EvidenceDecision, Feedback, GroundedAnswer, GroundingAssessment
 
 
 class RevisionRecord(TypedDict):
@@ -58,6 +57,12 @@ class QuestionGenState(ReviewState):
     explanation: str
     source_context: str
     previous_questions: list[str]
+    difficulty: Literal["easy", "medium", "hard"]
+    content_understanding: dict
+    validation: dict
+    review_required: bool
+    generation_diagnostics: dict
+    require_assessed_difficulty: bool
 
 
 class SummaryGenState(ReviewState):
@@ -77,6 +82,8 @@ class QuestionAnswerRequiredState(TypedDict):
 
 
 class QuestionAnswerState(QuestionAnswerRequiredState, total=False):
+    video_targeted_attempted: bool
+    video_processing_notice: str
     history_trimmed: int
     state_version: Literal[4]
     conversation_history: list[BaseMessage]

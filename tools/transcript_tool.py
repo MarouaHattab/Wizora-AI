@@ -1,13 +1,13 @@
-from collections.abc import Mapping, Sequence
 import math
 import time
+from collections.abc import Mapping, Sequence
 from numbers import Real
 from pathlib import Path
 from threading import BoundedSemaphore, Lock
 from typing import Any
 
-import whisper
 import numpy as np
+import whisper
 from langchain_core.documents import Document
 
 from helper.ingestion_errors import (
@@ -17,7 +17,6 @@ from helper.ingestion_errors import (
     TranscriptionError,
 )
 
-
 _WHISPER_MODEL = "tiny"
 _model = None
 _model_config = None
@@ -26,7 +25,11 @@ _inference_slots = BoundedSemaphore(1)
 
 
 def _setting(settings, name, default=None):
-    return settings.get(name, default) if isinstance(settings, Mapping) else getattr(settings, name, default)
+    return (
+        settings.get(name, default)
+        if isinstance(settings, Mapping)
+        else getattr(settings, name, default)
+    )
 
 
 def _get_model(settings=None) -> Any:
@@ -35,6 +38,7 @@ def _get_model(settings=None) -> Any:
     device = _setting(settings, "WHISPER_DEVICE", "cpu")
     if device == "auto":
         import torch
+
         device = "cuda" if torch.cuda.is_available() else "cpu"
     configuration = (name, device)
     with _model_lock:
@@ -49,8 +53,13 @@ def _get_model(settings=None) -> Any:
         return _model
 
 
-def _transcribe(media_path: str, *, audio_samples: np.ndarray | None = None,
-                settings=None, deadline: float | None = None) -> Mapping[str, Any]:
+def _transcribe(
+    media_path: str,
+    *,
+    audio_samples: np.ndarray | None = None,
+    settings=None,
+    deadline: float | None = None,
+) -> Mapping[str, Any]:
     path = Path(media_path)
     if not path.is_file():
         raise AssetNotFoundError("The media file was not found.")
@@ -65,17 +74,29 @@ def _transcribe(media_path: str, *, audio_samples: np.ndarray | None = None,
     ):
         raise TranscriptionError("The normalized transcription audio is invalid.")
     model = _get_model(settings)
-    acquired = _inference_slots.acquire(timeout=max(0, deadline - time.monotonic())) if deadline is not None else _inference_slots.acquire()
+    acquired = (
+        _inference_slots.acquire(timeout=max(0, deadline - time.monotonic()))
+        if deadline is not None
+        else _inference_slots.acquire()
+    )
     if not acquired:
-        raise TranscriptionError("The transcription deadline was exceeded while waiting for the model.")
+        raise TranscriptionError(
+            "The transcription deadline was exceeded while waiting for the model."
+        )
     try:
-        options = {"task": "transcribe", "temperature": 0.0, "condition_on_previous_text": False,
-                   "no_speech_threshold": float(_setting(settings, "WHISPER_NO_SPEECH_THRESHOLD", 0.6)),
-                   "fp16": str(getattr(model, "device", "cpu")).startswith("cuda")}
+        options = {
+            "task": "transcribe",
+            "temperature": 0.0,
+            "condition_on_previous_text": False,
+            "no_speech_threshold": float(_setting(settings, "WHISPER_NO_SPEECH_THRESHOLD", 0.6)),
+            "fp16": str(getattr(model, "device", "cpu")).startswith("cuda"),
+        }
         language = _setting(settings, "WHISPER_LANGUAGE")
         if language:
             options["language"] = language
-        result = model.transcribe(audio_samples if audio_samples is not None else str(media_path), **options)
+        result = model.transcribe(
+            audio_samples if audio_samples is not None else str(media_path), **options
+        )
     except Exception as exc:
         raise TranscriptionError("The media could not be transcribed.") from exc
     finally:
@@ -154,9 +175,7 @@ def _documents_from_result(
             " ".join(" ".join(segment_texts).split()),
         }
         if full_text.strip() and " ".join(full_text.split()) not in segment_versions:
-            raise TranscriptionError(
-                "The transcription text and segments are inconsistent."
-            )
+            raise TranscriptionError("The transcription text and segments are inconsistent.")
         return documents
     if full_text.strip():
         return [
@@ -178,15 +197,15 @@ def transcribe_documents(
     settings=None,
     deadline: float | None = None,
 ) -> list[Document]:
-    """Transcribe media into source records without discarding segment timing."""
     if source_type not in {"audio", "video"}:
         raise TranscriptionError("The media source type must be audio or video.")
-    result = _transcribe(media_path, audio_samples=audio_samples, settings=settings, deadline=deadline)
+    result = _transcribe(
+        media_path, audio_samples=audio_samples, settings=settings, deadline=deadline
+    )
     return _documents_from_result(result, media_path, asset_id, source_name, source_type)
 
 
 def transcript_loader(audio_path: str) -> str:
-    """Keep the legacy text interface while validating transcription failures."""
     result = _transcribe(audio_path)
     documents = _documents_from_result(result, audio_path, None, None, "audio")
     full_text = result.get("text")

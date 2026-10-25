@@ -7,7 +7,6 @@ from fastapi.responses import StreamingResponse
 from helper.failures import StorageUnavailable
 from helper.session_store import LeaseConflict, acquire_lease, release_lease
 
-
 _registry_lock = Lock()
 _session_locks = {}
 _consumed_reviews = {}
@@ -60,7 +59,9 @@ def acquire_session(workflow, thread_id):
         acquire_lease(workflow, thread_id, owner)
     except LeaseConflict:
         lock.release()
-        raise HTTPException(status_code=409, detail="Session is already processing a request") from None
+        raise HTTPException(
+            status_code=409, detail="Session is already processing a request"
+        ) from None
     except StorageUnavailable:
         lock.release()
         raise HTTPException(status_code=503, detail="Workflow storage is unavailable") from None
@@ -104,7 +105,9 @@ def validate_feedback(workflow, thread_id, snapshot, feedback, review_id):
     key = (workflow, thread_id)
     consumed = _consumed_reviews.get(key, set())
     if revision in consumed:
-        raise HTTPException(status_code=409, detail="Feedback for this review has already been accepted")
+        raise HTTPException(
+            status_code=409, detail="Feedback for this review has already been accepted"
+        )
     if review_id is None and consumed:
         raise HTTPException(
             status_code=409,

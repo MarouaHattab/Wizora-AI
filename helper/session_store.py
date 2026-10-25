@@ -6,7 +6,7 @@ from helper.failures import StorageUnavailable
 
 
 class LeaseConflict(RuntimeError):
-    """Another request already holds this session."""
+    pass
 
 
 _db_lock = Lock()
@@ -91,7 +91,11 @@ def acquire_lease(workflow, thread_id, owner):
                 "SELECT owner, acquired_at FROM wizora_lease WHERE workflow=? AND thread_id=?",
                 (workflow, thread_id),
             ).fetchone()
-            if row is not None and row["owner"] != owner and now - float(row["acquired_at"]) < _lease_seconds:
+            if (
+                row is not None
+                and row["owner"] != owner
+                and now - float(row["acquired_at"]) < _lease_seconds
+            ):
                 conn.rollback()
                 raise LeaseConflict("Session is already processing a request")
             conn.execute(
@@ -126,8 +130,14 @@ def release_lease(workflow, thread_id, owner):
 
 
 def record_session(
-    workflow, thread_id, *, status, review_id=None, asset_id=None,
-    error_category=None, preserve_terminal=False,
+    workflow,
+    thread_id,
+    *,
+    status,
+    review_id=None,
+    asset_id=None,
+    error_category=None,
+    preserve_terminal=False,
 ):
     now = datetime.now(timezone.utc).isoformat()
     with _db_lock:
@@ -140,7 +150,9 @@ def record_session(
                 (workflow, thread_id),
             ).fetchone()
             if (
-                preserve_terminal and existing is not None and status == "failed"
+                preserve_terminal
+                and existing is not None
+                and status == "failed"
                 and existing["status"] in _TERMINAL
             ):
                 status = existing["status"]
@@ -168,7 +180,17 @@ def record_session(
                     completed_at=excluded.completed_at,
                     last_error=excluded.last_error
                 """,
-                (workflow, thread_id, status, review_id, asset_id, created, now, completed, error_category),
+                (
+                    workflow,
+                    thread_id,
+                    status,
+                    review_id,
+                    asset_id,
+                    created,
+                    now,
+                    completed,
+                    error_category,
+                ),
             )
             conn.commit()
         except sqlite3.Error as exc:
@@ -189,7 +211,6 @@ def fetch_session(workflow, thread_id):
 
 
 def completed_sessions(workflow, asset_id=None):
-    """Discover accepted results using the metadata beside their checkpoints."""
     with _db_lock:
         conn = _connection()
         try:
@@ -215,7 +236,9 @@ def is_expired(workflow, thread_id, cutoff):
             "SELECT status, updated_at FROM wizora_session WHERE workflow=? AND thread_id=?",
             (workflow, thread_id),
         ).fetchone()
-    return row is not None and row["status"] in {"completed", "failed"} and row["updated_at"] < cutoff
+    return (
+        row is not None and row["status"] in {"completed", "failed"} and row["updated_at"] < cutoff
+    )
 
 
 def expired_threads(cutoff):
@@ -240,7 +263,11 @@ def delete_session_if_expired(workflow, thread_id, cutoff):
                 "SELECT status, updated_at FROM wizora_session WHERE workflow=? AND thread_id=?",
                 (workflow, thread_id),
             ).fetchone()
-            if row is None or row["status"] not in {"completed", "failed"} or row["updated_at"] >= cutoff:
+            if (
+                row is None
+                or row["status"] not in {"completed", "failed"}
+                or row["updated_at"] >= cutoff
+            ):
                 conn.rollback()
                 return False
             conn.execute(

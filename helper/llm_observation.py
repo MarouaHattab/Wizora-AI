@@ -3,7 +3,7 @@ from time import perf_counter
 from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.runnables.config import merge_configs
 
-from chains.contracts import ProviderExecutionError, StructuredOutputError
+from chains import ProviderExecutionError, StructuredOutputError
 from helper.workflow_metrics import metrics
 
 
@@ -112,28 +112,40 @@ class ObservedChain:
         metrics.observe("llm_latency_ms", (perf_counter() - started) * 1000, **labels)
         if usage.attempts is None:
             metrics.increment(
-                "llm_attempts_unavailable", task=self.task,
-                provider=self.provider, model=self.model,
+                "llm_attempts_unavailable",
+                task=self.task,
+                provider=self.provider,
+                model=self.model,
             )
         else:
             metrics.increment(
-                "llm_attempts", amount=usage.attempts, task=self.task,
-                provider=self.provider, model=self.model,
+                "llm_attempts",
+                amount=usage.attempts,
+                task=self.task,
+                provider=self.provider,
+                model=self.model,
             )
         if usage.tokens:
             metrics.add_tokens(
-                task=self.task, provider=self.provider,
-                model=self.model, tokens=usage.tokens,
+                task=self.task,
+                provider=self.provider,
+                model=self.model,
+                tokens=usage.tokens,
             )
         else:
             metrics.increment(
-                "llm_usage_unavailable", task=self.task,
-                provider=self.provider, model=self.model,
+                "llm_usage_unavailable",
+                task=self.task,
+                provider=self.provider,
+                model=self.model,
             )
         if category != "none":
             metrics.increment(
-                "llm_errors", task=self.task, provider=self.provider,
-                model=self.model, category=category,
+                "llm_errors",
+                task=self.task,
+                provider=self.provider,
+                model=self.model,
+                category=category,
             )
 
 

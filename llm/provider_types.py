@@ -1,0 +1,14 @@
+from enum import Enum
+
+
+class LLMEnums(Enum):
+    OPENAI_COMPATIBLE = "OPENAI_COMPATIBLE"
+    NVIDIA_NIM = "NVIDIA_NIM"
+    OLLAMA = "OLLAMA"
+    GOOGLE_GENAI = "GOOGLE_GENAI"
+    GROQ = "GROQ"
+
+
+class EmbeddingEnums(Enum):
+    LOCAL_EMBEDDING = "LOCAL_EMBEDDING"
+    HUGGINGFACE = "HUGGINGFACE"

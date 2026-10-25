@@ -5,7 +5,7 @@ import anyio
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
-from chains.contracts import StructuredOutputError
+from chains import StructuredOutputError
 from helper.asset_paths import validate_asset_id
 from helper.ingestion_errors import InvalidAssetError
 from helper.question_review import validate_question_draft
@@ -37,7 +37,9 @@ async def saved_questions(asset_id: str | None = None):
         try:
             question = validate_question_draft(snapshot.values)
         except (StructuredOutputError, KeyError):
-            raise HTTPException(status_code=502, detail="A saved question could not be validated") from None
+            raise HTTPException(
+                status_code=502, detail="A saved question could not be validated"
+            ) from None
         questions.append({**session, "result": question.model_dump(mode="json")})
     return {"questions": questions}
 
@@ -53,16 +55,41 @@ async def read_session(workflow: Workflow, thread_id: str):
     if status == "not_found":
         raise HTTPException(status_code=404, detail="Session not found")
     state = snapshot.values
-    keys = ({"question", "question_type", "options", "answer", "explanation", "critic_feedback", "review_notice", "revision_limit_reached"}
-            if workflow == "question_generation" else {"Main_Points", "summary", "review_notice", "revision_kind"}
-            if workflow == "summarization" else {"answer_status", "answer_citations", "grounding_status"})
-    result = {key: value.model_dump(mode="json") if isinstance(value, BaseModel) else value
-              for key, value in state.items() if key in keys}
+    keys = (
+        {
+            "question",
+            "question_type",
+            "difficulty",
+            "options",
+            "answer",
+            "explanation",
+            "critic_feedback",
+            "review_notice",
+            "revision_limit_reached",
+        }
+        if workflow == "question_generation"
+        else {"Main_Points", "summary", "review_notice", "revision_kind"}
+        if workflow == "summarization"
+        else {"answer_status", "answer_citations", "grounding_status"}
+    )
+    result = {
+        key: value.model_dump(mode="json") if isinstance(value, BaseModel) else value
+        for key, value in state.items()
+        if key in keys
+    }
     for key in ("source_citations", "source_scope", "context_note"):
         if key in state:
             result[key] = state[key]
     if workflow == "qa":
-        result["messages"] = [{"role": "user" if message.type == "human" else "assistant", "content": message.content}
-                              for message in canonical_messages(state)]
-    return {"thread_id": thread_id, "workflow": workflow, "asset_id": state.get("asset_id"),
-            "status": status, "review_id": review_revision(snapshot), "result": result}
+        result["messages"] = [
+            {"role": "user" if message.type == "human" else "assistant", "content": message.content}
+            for message in canonical_messages(state)
+        ]
+    return {
+        "thread_id": thread_id,
+        "workflow": workflow,
+        "asset_id": state.get("asset_id"),
+        "status": status,
+        "review_id": review_revision(snapshot),
+        "result": result,
+    }

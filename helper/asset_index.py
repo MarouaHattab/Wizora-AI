@@ -18,8 +18,10 @@ from langchain_community.vectorstores import Chroma
 from langchain_community.vectorstores.utils import maximal_marginal_relevance
 from langchain_core.documents import Document
 
-from llm.EmbeddingProviderFactory import EmbeddingProviderFactory, resolve_embedding_config
+from llm import EmbeddingProviderFactory, resolve_embedding_config
+
 from .asset_paths import validate_asset_id
+from .chunking import DEFAULT_SEPARATORS, SPLITTER_VERSION, split_documents
 from .ingestion_errors import (
     ChunkingError,
     EmbeddingError,
@@ -27,8 +29,6 @@ from .ingestion_errors import (
     IndexingError,
     ProcessingError,
 )
-from .text_splitter import DEFAULT_SEPARATORS, SPLITTER_VERSION, split_documents
-
 
 MAX_CACHED_INDEXES = 8
 _INDEX_SCHEMA_VERSION = 2
@@ -46,6 +46,8 @@ class RetrievalHit:
     # A bounded, metric-derived affinity; this is not a support probability.
     relevance: float
     rank: int
+    # Temporal evidence has unscored (zero) affinity and explicit priority.
+    priority: int = 0
 
 
 @dataclass(frozen=True)
@@ -58,9 +60,39 @@ class AssetIndex:
     _collection_metadata: dict = field(repr=False, compare=False)
     _lock: RLock = field(default_factory=RLock, repr=False, compare=False)
 
+    def temporal_hits(self, timestamp):
+        with self._lock:
+            if not _is_complete(self):
+                raise IndexingError("The asset index is incomplete")
+            hits = []
+            for identifier, (text, metadata) in self._expected_chunks.items():
+                if metadata.get("source_type") != "video" or metadata.get("start") is None:
+                    continue
+                start, end = metadata["start"], metadata.get("end", metadata["start"])
+                # A sampled frame is a point observation, not coverage of a
+                # neighbouring frame or of the interval between samples.
+                matches = (
+                    (start == end == timestamp and metadata.get("timestamp_precision") == "frame")
+                    if metadata.get("content_type") == "visual_description"
+                    else start <= timestamp < end
+                )
+                if matches:
+                    document = _retrieved_document(self, identifier, text, metadata)
+                    hits.append(RetrievalHit(document, 0.0, len(hits) + 1, priority=1))
+            return sorted(
+                hits,
+                key=lambda hit: (
+                    hit.document.metadata.get("content_type") != "visual_description",
+                    hit.rank,
+                ),
+            )[:8]
+
     def query_fits(self, question: str) -> bool:
         embedding = self.vectorstore._embedding_function
-        counter, limit = getattr(embedding, "token_count", None), getattr(embedding, "max_tokens", None)
+        counter, limit = (
+            getattr(embedding, "token_count", None),
+            getattr(embedding, "max_tokens", None),
+        )
         if callable(counter) and type(limit) is int:
             count = counter(question)
             if type(count) is not int or count < 0:
@@ -77,10 +109,12 @@ class AssetIndex:
                     question,
                     k=min(5, self.chunk_count),
                     fetch_k=min(20, self.chunk_count),
-                    filter={"$and": [
-                        {"asset_id": self.asset_id},
-                        {"index_version": self.index_version},
-                    ]},
+                    filter={
+                        "$and": [
+                            {"asset_id": self.asset_id},
+                            {"index_version": self.index_version},
+                        ]
+                    },
                 )
             except ProcessingError:
                 raise
@@ -98,26 +132,29 @@ class AssetIndex:
                     or not _metadata_matches(document.metadata, expected[1])
                     or document.id not in (None, chunk_id)
                 ):
-                    raise IndexingError("Retrieved content does not match the requested asset index")
+                    raise IndexingError(
+                        "Retrieved content does not match the requested asset index"
+                    )
                 document.metadata = expected[1]
                 document.id = chunk_id
             return documents
 
     def retrieve_scored(
-        self, question: str, *, strategy: str = "mmr", k: int = 5,
-        fetch_k: int = 20, min_relevance: float = 0.0, lambda_mult: float = 0.5,
-        exclude_ids=(), adjacent: bool = False,
+        self,
+        question: str,
+        *,
+        strategy: str = "mmr",
+        k: int = 5,
+        fetch_k: int = 20,
+        min_relevance: float = 0.0,
+        lambda_mult: float = 0.5,
+        exclude_ids=(),
+        adjacent: bool = False,
     ) -> list[RetrievalHit]:
-        """Retrieve within this immutable index using one query embedding.
-
-        Chroma returns squared L2, cosine distance, or one minus inner product,
-        according to the collection's actual configuration. The reported affinity
-        is a monotonic bounded transformation of that distance, not confidence.
-        Adjacent chunks compete within the same result limit and must pass the
-        same scope, integrity, and distance threshold checks.
-        """
         _validate_retrieval(question, strategy, k, fetch_k, min_relevance, lambda_mult)
-        if not isinstance(adjacent, bool) or not isinstance(exclude_ids, (list, tuple, set, frozenset)):
+        if not isinstance(adjacent, bool) or not isinstance(
+            exclude_ids, (list, tuple, set, frozenset)
+        ):
             raise ValueError("Invalid retrieval exclusions or adjacency setting")
         if any(not isinstance(value, str) or not value for value in exclude_ids):
             raise ValueError("Retrieval exclusions must contain chunk identifiers")
@@ -134,7 +171,11 @@ class AssetIndex:
                 if not self.query_fits(question):
                     raise EmbeddingError("The retrieval query exceeds the embedding token budget")
                 query_vector = np.asarray(embedding.embed_query(question), dtype=np.float32)
-                if query_vector.ndim != 1 or not len(query_vector) or not np.isfinite(query_vector).all():
+                if (
+                    query_vector.ndim != 1
+                    or not len(query_vector)
+                    or not np.isfinite(query_vector).all()
+                ):
                     raise EmbeddingError("The query embedding must be a finite vector")
                 collection = self.vectorstore._collection
                 metric = _collection_metric(collection)
@@ -143,14 +184,15 @@ class AssetIndex:
                     filters.append({"chunk_id": {"$nin": sorted(excluded)}})
                 rows = collection.query(
                     query_embeddings=[query_vector.tolist()],
-                    n_results=min(fetch_k, available), where={"$and": filters},
+                    n_results=min(fetch_k, available),
+                    where={"$and": filters},
                     include=["documents", "metadatas", "distances", "embeddings"],
                 )
                 candidates = _retrieval_rows(self, rows, metric, query_vector)
                 if adjacent and candidates:
                     # Expand the closest anchors, never the entire asset. Neighbours
                     # use stored vectors, so this does not embed the query again.
-                    anchors = candidates[:max(1, min(k // 2, len(candidates)))]
+                    anchors = candidates[: max(1, min(k // 2, len(candidates)))]
                     positions = {
                         metadata["chunk_index"]: chunk_id
                         for chunk_id, (_, metadata) in self._expected_chunks.items()
@@ -166,36 +208,54 @@ class AssetIndex:
                                 present.add(identifier)
                     if neighbour_ids:
                         neighbours = collection.get(
-                            ids=neighbour_ids[:2 * k],
+                            ids=neighbour_ids[: 2 * k],
                             where={"$and": filters},
                             include=["documents", "metadatas", "embeddings"],
                         )
                         for identifier, text, metadata, vector in zip(
-                            neighbours["ids"], neighbours["documents"],
-                            neighbours["metadatas"], neighbours["embeddings"], strict=True,
+                            neighbours["ids"],
+                            neighbours["documents"],
+                            neighbours["metadatas"],
+                            neighbours["embeddings"],
+                            strict=True,
                         ):
                             document = _retrieved_document(self, identifier, text, metadata)
                             distance = _vector_distance(query_vector, vector, metric)
-                            candidates.append((document, _distance_affinity(distance, metric), vector))
+                            candidates.append(
+                                (document, _distance_affinity(distance, metric), vector)
+                            )
                 candidates = [row for row in candidates if row[1] >= min_relevance]
                 candidates.sort(key=lambda row: -row[1])
                 if strategy == "mmr" and candidates:
-                    selected = set(maximal_marginal_relevance(
-                        query_vector, [row[2] for row in candidates],
-                        lambda_mult=lambda_mult, k=min(k, len(candidates)),
-                    ))
+                    selected = set(
+                        maximal_marginal_relevance(
+                            query_vector,
+                            [row[2] for row in candidates],
+                            lambda_mult=lambda_mult,
+                            k=min(k, len(candidates)),
+                        )
+                    )
                     # Match the existing Chroma adapter's distance-ordered output.
-                    candidates = [row for position, row in enumerate(candidates) if position in selected]
+                    candidates = [
+                        row for position, row in enumerate(candidates) if position in selected
+                    ]
                 else:
                     candidates = candidates[:k]
-                hits = [RetrievalHit(row[0], row[1], rank) for rank, row in enumerate(candidates, 1)]
+                hits = [
+                    RetrievalHit(row[0], row[1], rank) for rank, row in enumerate(candidates, 1)
+                ]
             except ProcessingError:
                 raise
             except Exception as exc:
                 raise IndexingError("Unable to retrieve the asset's indexed content") from exc
         _logger.debug(
             "Asset retrieval strategy=%s metric=%s requested=%d returned=%d excluded=%d elapsed_ms=%.1f",
-            strategy, metric, k, len(hits), len(excluded), (perf_counter() - started) * 1000,
+            strategy,
+            metric,
+            k,
+            len(hits),
+            len(excluded),
+            (perf_counter() - started) * 1000,
         )
         return hits
 
@@ -208,7 +268,12 @@ def _validate_retrieval(question, strategy, k, fetch_k, min_relevance, lambda_mu
     if type(k) is not int or type(fetch_k) is not int or not 1 <= k <= fetch_k <= 1000:
         raise ValueError("Retrieval requires 1 <= k <= fetch_k <= 1000")
     for value in (min_relevance, lambda_mult):
-        if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or not 0 <= value <= 1:
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not math.isfinite(value)
+            or not 0 <= value <= 1
+        ):
             raise ValueError("Retrieval affinity and diversity must be between zero and one")
 
 
@@ -226,7 +291,11 @@ def _collection_metric(collection):
 
 
 def _distance_affinity(distance, metric):
-    if isinstance(distance, bool) or not isinstance(distance, (int, float, np.number)) or not math.isfinite(distance):
+    if (
+        isinstance(distance, bool)
+        or not isinstance(distance, (int, float, np.number))
+        or not math.isfinite(distance)
+    ):
         raise IndexingError("The index returned a nonfinite distance")
     if metric == "l2":
         if distance < -1e-5:
@@ -275,7 +344,8 @@ def _metadata_matches(actual, expected):
 def _retrieved_document(index, identifier, text, metadata):
     expected = index._expected_chunks.get(identifier)
     if (
-        not isinstance(metadata, dict) or expected is None
+        not isinstance(metadata, dict)
+        or expected is None
         or metadata.get("chunk_id") != identifier
         or metadata.get("asset_id") != index.asset_id
         or metadata.get("index_version") != index.index_version
@@ -289,8 +359,12 @@ def _retrieved_document(index, identifier, text, metadata):
 def _retrieval_rows(index, rows, metric, query_vector):
     candidates = []
     for identifier, text, metadata, distance, vector in zip(
-        rows["ids"][0], rows["documents"][0], rows["metadatas"][0],
-        rows["distances"][0], rows["embeddings"][0], strict=True,
+        rows["ids"][0],
+        rows["documents"][0],
+        rows["metadatas"][0],
+        rows["distances"][0],
+        rows["embeddings"][0],
+        strict=True,
     ):
         document = _retrieved_document(index, identifier, text, metadata)
         _vector_distance(query_vector, vector, metric)
@@ -334,23 +408,38 @@ def _source_documents(asset_id, context, documents):
             if (
                 not isinstance(name, str)
                 or not isinstance(value, (str, int, float, bool))
-                or isinstance(value, float) and not math.isfinite(value)
+                or isinstance(value, float)
+                and not math.isfinite(value)
             ):
                 raise IndexingError("Source metadata must contain finite scalar values")
-        metadata.setdefault("record_id", _digest({
-            "text": document.page_content, "metadata": metadata,
-        }))
-        records.append(Document(
-            page_content=document.page_content,
-            metadata=metadata,
-            id=document.id or metadata["record_id"],
-        ))
+        metadata.setdefault(
+            "record_id",
+            _digest(
+                {
+                    "text": document.page_content,
+                    "metadata": metadata,
+                }
+            ),
+        )
+        records.append(
+            Document(
+                page_content=document.page_content,
+                metadata=metadata,
+                id=document.id or metadata["record_id"],
+            )
+        )
     if not records:
         raise EmptyContentError("The asset has no text to index")
-    return records, source_hash, _digest([
-        {"id": record.id, "text": record.page_content, "metadata": record.metadata}
-        for record in records
-    ])
+    return (
+        records,
+        source_hash,
+        _digest(
+            [
+                {"id": record.id, "text": record.page_content, "metadata": record.metadata}
+                for record in records
+            ]
+        ),
+    )
 
 
 @contextmanager
@@ -391,7 +480,8 @@ def _is_complete(index):
         try:
             collection = index.vectorstore._collection
             metadata = index.vectorstore._client.get_collection(
-                collection.name, embedding_function=None,
+                collection.name,
+                embedding_function=None,
             ).metadata
             if metadata != index._collection_metadata or collection.count() != index.chunk_count:
                 return False
@@ -407,7 +497,10 @@ def _is_complete(index):
                 content == index._expected_chunks[chunk_id][0]
                 and _metadata_matches(metadata, index._expected_chunks[chunk_id][1])
                 for chunk_id, content, metadata in zip(
-                    rows["ids"], rows["documents"], rows["metadatas"], strict=True,
+                    rows["ids"],
+                    rows["documents"],
+                    rows["metadatas"],
+                    strict=True,
                 )
             )
         except Exception:
@@ -416,6 +509,7 @@ def _is_complete(index):
 
 def _remember(index):
     from .asset_catalog import mark_index_ready
+
     mark_index_ready(index.asset_id, index.index_version, index.chunk_count)
     with _cache_lock:
         _indexes[index.index_version] = index
@@ -492,6 +586,7 @@ def ensure_asset_index(
         if previous is not None and _is_complete(previous):
             _remember(previous)
             from helper.workflow_metrics import metrics
+
             metrics.increment("index_reuse")
             return previous
         if previous is not None:
@@ -520,18 +615,20 @@ def ensure_asset_index(
                 f"{index_version}:{chunk_index}:{content_hash}".encode("utf-8")
             ).hexdigest()
             metadata = dict(chunk.metadata)
-            metadata.update({
-                "asset_id": asset_id,
-                "index_version": index_version,
-                "index_schema_version": _INDEX_SCHEMA_VERSION,
-                "embedding_config_version": embedding_version,
-                "record_chunk_index": metadata.get("chunk_index", 0),
-                "chunk_index": chunk_index,
-                "chunk_id": chunk_id,
-                "content_hash": content_hash,
-                "source_hash": source_hash,
-                "records_hash": records_hash,
-            })
+            metadata.update(
+                {
+                    "asset_id": asset_id,
+                    "index_version": index_version,
+                    "index_schema_version": _INDEX_SCHEMA_VERSION,
+                    "embedding_config_version": embedding_version,
+                    "record_chunk_index": metadata.get("chunk_index", 0),
+                    "chunk_index": chunk_index,
+                    "chunk_id": chunk_id,
+                    "content_hash": content_hash,
+                    "source_hash": source_hash,
+                    "records_hash": records_hash,
+                }
+            )
             ids.append(chunk_id)
             texts.append(text)
             metadatas.append(metadata)
@@ -564,8 +661,13 @@ def ensure_asset_index(
                 client=client,
             )
             index = AssetIndex(
-                asset_id, index_version, len(texts), vectorstore,
-                expected_chunks, collection_metadata, collection_lock,
+                asset_id,
+                index_version,
+                len(texts),
+                vectorstore,
+                expected_chunks,
+                collection_metadata,
+                collection_lock,
             )
             if not _is_complete(index):
                 raise IndexingError("The asset index is incomplete after construction")

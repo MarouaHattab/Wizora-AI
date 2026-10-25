@@ -76,7 +76,9 @@ class EmbeddingResource(Embeddings):
                 self._fingerprint["revision"] = revision
             self.token_count("")
         except Exception as exc:
-            raise ModelInitializationError("The embedding model configuration could not be initialized.") from exc
+            raise ModelInitializationError(
+                "The embedding model configuration could not be initialized."
+            ) from exc
 
     @property
     def fingerprint(self) -> dict:
@@ -96,9 +98,11 @@ class EmbeddingResource(Embeddings):
                 text = (self._prompt + text).strip()
                 if self._lowercase:
                     text = text.lower()
-                return len(self.tokenizer.encode(
-                    text, add_special_tokens=True, truncation=False, verbose=False
-                ))
+                return len(
+                    self.tokenizer.encode(
+                        text, add_special_tokens=True, truncation=False, verbose=False
+                    )
+                )
             except Exception as exc:
                 raise EmbeddingError("The embedding input could not be tokenized.") from exc
 
@@ -119,7 +123,9 @@ class EmbeddingResource(Embeddings):
         result = []
         for vector in vectors:
             if len(vector) != self.embedding_size:
-                raise EmbeddingError("The embedding model returned an inconsistent vector dimension.")
+                raise EmbeddingError(
+                    "The embedding model returned an inconsistent vector dimension."
+                )
             values = [float(value) for value in vector]
             if not all(isfinite(value) for value in values):
                 raise EmbeddingError("The embedding model returned non-finite vector values.")

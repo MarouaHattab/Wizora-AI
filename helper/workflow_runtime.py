@@ -9,11 +9,16 @@ from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from helper import get_settings
 from helper.failures import StorageUnavailable
 from helper.session_store import (
-    close_store, delete_session_if_expired, expired_threads, is_expired, open_store, ping, record_session,
+    close_store,
+    delete_session_if_expired,
+    expired_threads,
+    is_expired,
+    open_store,
+    ping,
+    record_session,
 )
 from helper.workflow_logging import configure_logging
 from helper.workflow_metrics import metrics
-
 
 logger = logging.getLogger("wizora.runtime")
 _STATUS = {
@@ -96,9 +101,11 @@ class WorkflowRuntime:
         if not self.ready or self.saver is None:
             return False
         try:
-            await self.saver.aget_tuple({
-                "configurable": {"thread_id": "__wizora_health__", "checkpoint_ns": ""},
-            })
+            await self.saver.aget_tuple(
+                {
+                    "configurable": {"thread_id": "__wizora_health__", "checkpoint_ns": ""},
+                }
+            )
         except Exception:
             return False
         return ping()
@@ -106,7 +113,9 @@ class WorkflowRuntime:
     async def _cleanup(self, settings):
         if settings.SESSION_RETENTION_DAYS <= 0:
             return 0
-        cutoff = (datetime.now(timezone.utc) - timedelta(days=settings.SESSION_RETENTION_DAYS)).isoformat()
+        cutoff = (
+            datetime.now(timezone.utc) - timedelta(days=settings.SESSION_RETENTION_DAYS)
+        ).isoformat()
         removed = 0
         for workflow, thread_id in expired_threads(cutoff):
             if not is_expired(workflow, thread_id, cutoff):
@@ -143,13 +152,20 @@ def note_snapshot(workflow, thread_id, snapshot, *, started=None, error=None, re
     review_id = review_revision(snapshot) if snapshot is not None else None
     try:
         record_session(
-            workflow, thread_id, status=status, review_id=review_id, asset_id=asset_id,
-            error_category=category, preserve_terminal=preserve_terminal,
+            workflow,
+            thread_id,
+            status=status,
+            review_id=review_id,
+            asset_id=asset_id,
+            error_category=category,
+            preserve_terminal=preserve_terminal,
         )
     except StorageUnavailable:
         logger.warning(
             "session metadata was not recorded workflow=%s thread=%s status=%s",
-            workflow, thread_id, status,
+            workflow,
+            thread_id,
+            status,
         )
     elapsed = None if started is None else round((perf_counter() - started) * 1000, 3)
     if elapsed is not None:
@@ -162,7 +178,11 @@ def note_snapshot(workflow, thread_id, snapshot, *, started=None, error=None, re
         metrics.increment("workflow_failed", workflow=workflow)
     logger.info(
         "workflow snapshot request=%s workflow=%s thread=%s status=%s elapsed_ms=%s error=%s",
-        request_id or "-", workflow, thread_id, status, elapsed if elapsed is not None else "-",
+        request_id or "-",
+        workflow,
+        thread_id,
+        status,
+        elapsed if elapsed is not None else "-",
         category or "-",
     )
 
@@ -198,13 +218,17 @@ def acquire_process_lock(path):
     try:
         if os.name == "nt":
             import msvcrt
+
             msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
         else:
             import fcntl
+
             fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
     except OSError as exc:
         handle.close()
-        raise RuntimeError("Another Wizora-AI process is already running for this checkpoint database") from exc
+        raise RuntimeError(
+            "Another Wizora-AI process is already running for this checkpoint database"
+        ) from exc
     return handle
 
 
@@ -215,9 +239,11 @@ def release_process_lock(handle):
         handle.seek(0)
         if os.name == "nt":
             import msvcrt
+
             msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
         else:
             import fcntl
+
             fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
     except OSError:
         pass

@@ -5,14 +5,6 @@ __pycache__/
 .pytest_cache/
 .ruff_cache/
 
-# AI-generated documentation
-/ai_docs/
-/ai_notes/
-/docs/ai/
-/implementation_notes.md
-/development_plan.md
-/task_progress.md
-
 # Local secrets
 .env
 .env.*
@@ -32,7 +24,12 @@ __pycache__/
 htmlcov/
 *.log
 /output/
-docs
+/video_used_for_test/
+/.mypy_cache/
+.coverage.*
+coverage.xml
+playwright-report/
+test-results/
 # Build output
 build/
 dist/

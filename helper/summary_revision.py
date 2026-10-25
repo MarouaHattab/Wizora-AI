@@ -1,6 +1,5 @@
 import re
 
-
 _STRUCTURAL = re.compile(
     r"\b(?:reorganiz\w*|restructur\w*|outlines?|sections?|headings?|subsections?|"
     r"table of contents|main points|re-?order\w*|change the order|"

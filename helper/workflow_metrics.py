@@ -3,7 +3,9 @@ from threading import Lock
 
 def _label(value):
     text = str(value)
-    cleaned = "".join(char if char.isalnum() or char in {"_", "-", ".", "/"} else "_" for char in text)
+    cleaned = "".join(
+        char if char.isalnum() or char in {"_", "-", ".", "/"} else "_" for char in text
+    )
     return cleaned[:80] or "unknown"
 
 

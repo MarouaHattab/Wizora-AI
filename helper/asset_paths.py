@@ -3,7 +3,6 @@ from pathlib import Path, PureWindowsPath
 
 from .ingestion_errors import AssetNotFoundError, InvalidAssetError
 
-
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 ASSETS_ROOT = PROJECT_ROOT / "assets"
 _ASSET_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}\Z")

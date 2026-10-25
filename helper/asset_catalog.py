@@ -23,7 +23,7 @@ def _status_io(operation):
             if os.name != "nt" or attempt == 5:
                 raise
             # Windows scanners can briefly hold an otherwise closed status file.
-            time.sleep(.02 * 2 ** attempt)
+            time.sleep(0.02 * 2**attempt)
 
 
 def _now():
@@ -59,11 +59,17 @@ def write_job(asset_id, **updates):
         path = _job_path(asset_id)
         temporary = path.with_suffix(f".{uuid4().hex}.tmp")
         try:
-            value = json.loads(_status_io(lambda: path.read_text(encoding="utf-8"))) if path.exists() else {"id": asset_id, "created_at": _now(), "stages": []}
+            value = (
+                json.loads(_status_io(lambda: path.read_text(encoding="utf-8")))
+                if path.exists()
+                else {"id": asset_id, "created_at": _now(), "stages": []}
+            )
             if not isinstance(value, dict) or value.get("id") != asset_id:
                 raise StorageError("Invalid processing status")
             value.update(updates, updated_at=_now())
-            temporary.write_text(json.dumps(value, ensure_ascii=False, allow_nan=False), encoding="utf-8")
+            temporary.write_text(
+                json.dumps(value, ensure_ascii=False, allow_nan=False), encoding="utf-8"
+            )
             _status_io(lambda: temporary.replace(path))
         except (OSError, ValueError) as exc:
             try:
@@ -78,9 +84,12 @@ def record_stage(asset_id, stage, details=None):
     with _lock:
         value = read_job(asset_id)
         stages = list(value.get("stages", []))
-        safe = {key: item for key, item in (details or {}).items()
-                if key in {"segment", "segments", "count", "duration_seconds", "timestamp", "status"}
-                and isinstance(item, (str, int, float, bool))}
+        safe = {
+            key: item
+            for key, item in (details or {}).items()
+            if key in {"segment", "segments", "count", "duration_seconds", "timestamp", "status"}
+            and isinstance(item, (str, int, float, bool))
+        }
         event = {"name": stage, "at": _now(), **safe}
         if stages and stages[-1]["name"] == stage:
             stages[-1] = event
@@ -91,19 +100,69 @@ def record_stage(asset_id, stage, details=None):
 
 def _legacy_asset(asset_id):
     from .asset_storage import load_asset_documents
+
     documents = load_asset_documents(asset_id)
     originals = sorted(asset_directory(asset_id).glob("original.*"))
-    return {"id": asset_id, "status": "ready", "source_name": documents[0].metadata.get("source", asset_id),
-            "source_type": documents[0].metadata.get("source_type", "text"), "record_count": len(documents),
-            "index_status": "deferred", "files": [path.name for path in originals], "stages": [],
-            "content_types": dict(Counter(document.metadata.get("content_type", "text") for document in documents))}
+    return {
+        "id": asset_id,
+        "status": "ready",
+        "source_name": documents[0].metadata.get("source", asset_id),
+        "source_type": documents[0].metadata.get("source_type", "text"),
+        "record_count": len(documents),
+        "index_status": "deferred",
+        "files": [path.name for path in originals],
+        "stages": [],
+        "content_types": dict(
+            Counter(document.metadata.get("content_type", "text") for document in documents)
+        ),
+    }
 
 
 def public_job(value):
-    allowed = {"id", "status", "source_name", "source_type", "size_bytes", "created_at", "updated_at",
-               "stages", "error", "record_count", "content_types", "language", "languages", "pages", "sections",
-               "duration_seconds", "audio_status", "audio_reason", "visual_status", "frame_count", "processing_scope", "index_status",
-               "index_version", "chunk_count", "files", "warnings"}
+    allowed = {
+        "id",
+        "status",
+        "source_name",
+        "source_type",
+        "size_bytes",
+        "created_at",
+        "updated_at",
+        "stages",
+        "error",
+        "record_count",
+        "content_types",
+        "language",
+        "languages",
+        "pages",
+        "sections",
+        "duration_seconds",
+        "audio_status",
+        "audio_reason",
+        "visual_status",
+        "frame_count",
+        "processing_scope",
+        "index_status",
+        "index_version",
+        "chunk_count",
+        "files",
+        "warnings",
+        "vlm_mode",
+        "requested_vlm_mode",
+    }
+    allowed.update(
+        {
+            "batch_id",
+            "source_file_ids",
+            "organization_mode",
+            "duplicate_record_count",
+            "resumable",
+            "retry_count",
+            "metrics",
+            "semantic_deduplication",
+            "timeline_reference",
+        }
+    )
+    allowed.update(key for key in value if key.endswith("_visual_count"))
     public = {key: item for key, item in value.items() if key in allowed}
     if public.get("index_status") == "ready" and value.get("index_process") != os.getpid():
         public.update(index_status="deferred")
@@ -134,8 +193,13 @@ def list_assets(limit=100):
 def mark_index_ready(asset_id, index_version, chunk_count):
     try:
         if _job_path(asset_id).exists():
-            write_job(asset_id, index_status="ready", index_version=index_version,
-                      chunk_count=chunk_count, index_process=os.getpid())
+            write_job(
+                asset_id,
+                index_status="ready",
+                index_version=index_version,
+                chunk_count=chunk_count,
+                index_process=os.getpid(),
+            )
     except StorageError:
         # An unavailable status cache must not invalidate a verified search index.
         pass
@@ -150,6 +214,16 @@ def source_file(asset_id, reference):
     relative = PurePosixPath(reference)
     if relative.is_absolute() or ".." in relative.parts or "\\" in reference:
         raise InvalidAssetError("Invalid source reference")
+    if value.get("source_type") == "collection":
+        target = value.get("source_map", {}).get(reference)
+        if (
+            not isinstance(target, dict)
+            or target.get("source_file_id") not in value.get("source_file_ids", [])
+            or target["source_file_id"] == asset_id
+        ):
+            raise InvalidAssetError("The combined source reference is unavailable")
+        original, _ = source_file(target["source_file_id"], target.get("reference"))
+        return original, value
     directory = asset_directory(asset_id, must_exist=True)
     target = (directory / reference).resolve()
     if not target.is_relative_to(directory) or not target.is_file():
@@ -158,14 +232,31 @@ def source_file(asset_id, reference):
 
 
 def recover_interrupted_uploads():
+    from helper import get_settings
+
+    retention = float(getattr(get_settings(), "INGESTION_CHECKPOINT_RETENTION_HOURS", 24)) * 3600
     directory = asset_paths.ASSETS_ROOT.resolve() / ".jobs"
     for path in directory.glob("*.json") if directory.is_dir() else ():
         try:
             with _lock:
                 value = json.loads(_status_io(lambda: path.read_text(encoding="utf-8")))
-            if (isinstance(value, dict) and value.get("id") == path.stem
-                    and value.get("status") in ("queued", "processing")):
-                write_job(value["id"], status="failed", error={"category": "interrupted", "detail": "Processing was interrupted. Upload the file again."})
+            if (
+                isinstance(value, dict)
+                and value.get("id") == path.stem
+                and value.get("status") in ("queued", "processing")
+            ):
+                from helper.ingestion import recover_published_asset
+
+                if recover_published_asset(value["id"]):
+                    continue
+                write_job(
+                    value["id"],
+                    status="failed",
+                    error={
+                        "category": "interrupted",
+                        "detail": "Processing was interrupted. Resume failed files when a recovery checkpoint is available.",
+                    },
+                )
         except (OSError, ValueError, StorageError, InvalidAssetError):
             continue
     root = asset_paths.ASSETS_ROOT.resolve()
@@ -173,5 +264,25 @@ def recover_interrupted_uploads():
     if staging.is_relative_to(root) and staging != root and staging.is_dir():
         for entry in staging.iterdir():
             target = entry.resolve()
-            if target.is_relative_to(staging) and target != staging and target.is_dir() and not entry.is_symlink():
+            if (
+                target.is_relative_to(staging)
+                and target != staging
+                and target.is_dir()
+                and not entry.is_symlink()
+            ):
+                # Keep private validated inputs/chunks for an explicit retry.
+                # Old or incomplete staging directories are still reclaimed.
+                manifest = target / ".resume.json"
+                if manifest.is_file() and time.time() - manifest.stat().st_mtime < retention:
+                    continue
                 shutil.rmtree(target)
+                if manifest.name == ".resume.json":
+                    for job_path in directory.glob("*.json") if directory.is_dir() else ():
+                        try:
+                            expired = json.loads(job_path.read_text(encoding="utf-8"))
+                            if expired.get("staging_name") == entry.name and expired.get(
+                                "resumable"
+                            ):
+                                write_job(expired["id"], resumable=False)
+                        except (OSError, ValueError, KeyError, StorageError):
+                            continue

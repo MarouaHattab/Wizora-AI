@@ -3,17 +3,16 @@ import re
 
 from pydantic import SecretStr
 
-
 _SECRET_FIELDS = (
+    "NVIDIA_NIM_API_KEY",
+    "OPENAI_COMPATIBLE_API_KEY",
     "GROQ_API_KEY",
     "GOOGLE_API_KEY",
     "HUGGING_FACE_HUB_TOKEN",
     "LANGSMITH_API_KEY",
     "OLLAMA_API_KEY",
 )
-_ASSIGNMENT = re.compile(
-    r"(?i)\b(api[_-]?key|token|secret|password|authorization)\b\s*[=:]\s*\S+"
-)
+_ASSIGNMENT = re.compile(r"(?i)\b(api[_-]?key|token|secret|password|authorization)\b\s*[=:]\s*\S+")
 
 
 def secret_values(settings):
@@ -58,5 +57,7 @@ def configure_logging(settings):
         handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s %(message)s"))
         root.addHandler(handler)
     for handler in root.handlers:
-        if not any(isinstance(existing, RedactFilter) for existing in getattr(handler, "filters", ())):
+        if not any(
+            isinstance(existing, RedactFilter) for existing in getattr(handler, "filters", ())
+        ):
             handler.addFilter(redactor)

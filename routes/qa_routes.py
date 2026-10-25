@@ -6,14 +6,27 @@ import uuid
 from fastapi import APIRouter, HTTPException
 from langchain_core.messages import AIMessage, HumanMessage
 
-from controllers.GraphState import QuestionAnswerState
+from controllers import QuestionAnswerState
 from controllers.QuestionAnswerGraphController import message_text
 from helper import get_settings
-from helper.asset_http import SingleAssetRequest, WorkflowRequest, read_asset_text, validate_session_asset
+from helper.asset_http import (
+    SingleAssetRequest,
+    WorkflowRequest,
+    read_asset_text,
+    validate_session_asset,
+)
 from helper.failures import StorageUnavailable
 from helper.session_review import SessionStreamingResponse, acquire_session, session_status
-from helper.sse import EventStream, EventVersion, before_deadline, close_events, events_before, public_error
+from helper.sse import (
+    EventStream,
+    EventVersion,
+    before_deadline,
+    close_events,
+    events_before,
+    public_error,
+)
 from helper.workflow_history import canonical_messages
+from helper.workflow_jobs import WorkflowOperation
 from helper.workflow_metrics import metrics
 from helper.workflow_runtime import note_snapshot, require_graph
 
@@ -34,12 +47,19 @@ class QAContinueRequest(WorkflowRequest):
 
 
 _QA_NODES = {
-    "understand_query", "retrieve", "assess_evidence", "corrective_retrieval",
-    "generate_answer_streaming", "validate_grounding", "off_topic_response",
+    "understand_query",
+    "retrieve",
+    "assess_evidence",
+    "corrective_retrieval",
+    "generate_answer_streaming",
+    "validate_grounding",
+    "off_topic_response",
 }
 
 
-def _stream_response(payload, config, metadata, session_lock, graph, event_version: EventVersion = "legacy"):
+def _stream_response(
+    payload, config, metadata, session_lock, graph, event_version: EventVersion = "legacy"
+):
     async def generate():
         stream = EventStream(config["configurable"]["thread_id"], event_version)
         iterator = None
@@ -47,9 +67,19 @@ def _stream_response(payload, config, metadata, session_lock, graph, event_versi
         started = time.perf_counter()
         node_started = {}
         snapshot = None
+        operation = None
+        status = "failed"
         try:
+            operation = WorkflowOperation(
+                "qa",
+                {"asset_id": metadata.get("asset_id") or payload.get("asset_id")},
+                settings,
+                thread_id=config["configurable"]["thread_id"],
+                request_id=stream.run_id,
+            )
             yield stream.emit(
-                "session_started", data=metadata,
+                "session_started",
+                data=metadata,
                 legacy={"type": "metadata", **metadata},
             )
             deadline = time.monotonic() + settings.GRAPH_TIMEOUT_SECONDS
@@ -64,8 +94,10 @@ def _stream_response(payload, config, metadata, session_lock, graph, event_versi
                     node_started[timed] = time.perf_counter()
                 elif event_type == "on_chain_end" and timed in node_started:
                     metrics.observe(
-                        "node_ms", (time.perf_counter() - node_started.pop(timed)) * 1000,
-                        workflow="qa", node=timed,
+                        "node_ms",
+                        (time.perf_counter() - node_started.pop(timed)) * 1000,
+                        workflow="qa",
+                        node=timed,
                     )
                 if event_type == "on_chain_start" and (
                     event.get("name") in {"validate_grounding", "off_topic_response"}
@@ -79,7 +111,8 @@ def _stream_response(payload, config, metadata, session_lock, graph, event_versi
             status = session_status(snapshot)
             if status == "interrupted_for_feedback":
                 yield stream.emit(
-                    "awaiting_feedback", data={"status": status},
+                    "awaiting_feedback",
+                    data={"status": status},
                     legacy={"type": "interrupted", "status": status},
                 )
                 return
@@ -90,21 +123,29 @@ def _stream_response(payload, config, metadata, session_lock, graph, event_versi
             if not final_text.strip() or not final_text.startswith(streamed_text):
                 raise ValueError("The completed answer does not match the stream")
             if len(final_text) > len(streamed_text):
-                suffix = final_text[len(streamed_text):]
+                suffix = final_text[len(streamed_text) :]
                 streamed_text += suffix
                 yield stream.emit(
-                    "text_delta", stage="answer", data={"text": suffix},
+                    "text_delta",
+                    stage="answer",
+                    data={"text": suffix},
                     legacy={"type": "token", "content": suffix},
                 )
             if final_text != streamed_text:
                 raise ValueError("The completed answer does not match the public text")
             yield stream.emit(
-                "completed", data={
-                    "status": "completed", "answer_status": snapshot.values.get("answer_status"),
+                "completed",
+                data={
+                    "status": "completed",
+                    "answer_status": snapshot.values.get("answer_status"),
                     "citations": snapshot.values.get("answer_citations", []),
                     "grounding": snapshot.values.get("grounding_status", "not_applicable"),
-                }, legacy={
-                    "type": "complete", "answer_status": snapshot.values.get("answer_status"),
+                    "model_info": operation.provider_details()[0] if operation else {},
+                    "provider_warnings": operation.provider_details()[1] if operation else [],
+                },
+                legacy={
+                    "type": "complete",
+                    "answer_status": snapshot.values.get("answer_status"),
                     "citations": snapshot.values.get("answer_citations", []),
                     "grounding": snapshot.values.get("grounding_status", "not_applicable"),
                 },
@@ -114,10 +155,13 @@ def _stream_response(payload, config, metadata, session_lock, graph, event_versi
             public = public_error(error)
             logger.warning(
                 "QA stream failed (category=%s, exception_type=%s, run_id=%s)",
-                public["category"], type(error).__name__, stream.run_id,
+                public["category"],
+                type(error).__name__,
+                stream.run_id,
             )
             frame = stream.emit(
-                "failed", data=public,
+                "failed",
+                data=public,
                 legacy={"type": "error", "status": "failed", **public},
             )
             if frame:
@@ -127,18 +171,28 @@ def _stream_response(payload, config, metadata, session_lock, graph, event_versi
                 await close_events(iterator)
             finally:
                 try:
+                    if operation is not None:
+                        operation.finish(snapshot, status=status, error=failure)
                     note_snapshot(
-                        "qa", config["configurable"]["thread_id"], snapshot,
-                        started=started, error=failure, request_id=stream.run_id,
+                        "qa",
+                        config["configurable"]["thread_id"],
+                        snapshot,
+                        started=started,
+                        error=failure,
+                        request_id=stream.run_id,
                     )
                 finally:
                     session_lock.release()
 
     return SessionStreamingResponse(
-        generate(), session_lock=session_lock, media_type="text/event-stream",
+        generate(),
+        session_lock=session_lock,
+        media_type="text/event-stream",
         headers={
-            "Cache-Control": "no-cache", "Connection": "keep-alive",
-            "Access-Control-Allow-Origin": "*", "Access-Control-Allow-Headers": "*",
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Headers": "*",
         },
     )
 
@@ -154,14 +208,22 @@ async def start_qa_session_stream(
     initial_state = QuestionAnswerState(
         asset_id=request.asset_id,
         messages=[HumanMessage(content=request.initial_question, id=str(uuid.uuid4()))],
-        relevant_text=[], on_topic="", context=context, state_version=4, history_trimmed=0,
+        relevant_text=[],
+        on_topic="",
+        context=context,
+        state_version=4,
+        history_trimmed=0,
     )
     config = {"configurable": {"thread_id": thread_id}, "recursion_limit": 12}
     graph = require_graph("qa")
     session_lock = acquire_session("qa", thread_id)
     return _stream_response(
-        initial_state, config, {"thread_id": thread_id, "asset_id": request.asset_id},
-        session_lock, graph, request.event_version,
+        initial_state,
+        config,
+        {"thread_id": thread_id, "asset_id": request.asset_id},
+        session_lock,
+        graph,
+        request.event_version,
     )
 
 
@@ -181,7 +243,9 @@ async def continue_qa_conversation_stream(
         if status == "not_found":
             raise HTTPException(status_code=404, detail="Session not found. Start a new session.")
         if status != "completed":
-            raise HTTPException(status_code=409, detail="Session has not completed its previous question")
+            raise HTTPException(
+                status_code=409, detail="Session has not completed its previous question"
+            )
         state = snapshot.values
         await validate_session_asset(state)
         messages = canonical_messages(state)
@@ -189,7 +253,14 @@ async def continue_qa_conversation_stream(
             raise HTTPException(status_code=409, detail="Session has no completed answer")
         payload = {"messages": [HumanMessage(content=next_question, id=str(uuid.uuid4()))]}
         metrics.increment("workflow_continue", workflow="qa")
-        return _stream_response(payload, config, {"thread_id": thread_id}, session_lock, graph, request.event_version)
+        return _stream_response(
+            payload,
+            config,
+            {"thread_id": thread_id, "asset_id": state["asset_id"]},
+            session_lock,
+            graph,
+            request.event_version,
+        )
     except HTTPException:
         session_lock.release()
         raise

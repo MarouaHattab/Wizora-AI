@@ -2,12 +2,12 @@
   "dockerfile_lines": [],
   "graphs": {
     "Question_Generation_Graph": "./QuestionGenGraphController.py:graph",
-    "Summary_Generation_Graph": "./SummarizerGenGraphController.py:summarizer_graph",
-    "Answer_Generation_Graph": "./QuestionAnswerGraphController.py:qa_graph"
+    "Summary_Generation_Graph": "./SummarizerGenGraphController.py:stream_graph",
+    "Answer_Generation_Graph": "./QuestionAnswerGraphController.py:stream_graph"
   },
-  "env": "",
+  "env": "../.env",
   "python_version": "3.11",
   "dependencies": [
-    "."
+    ".."
   ]
 }
