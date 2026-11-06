@@ -13,7 +13,20 @@ Wizora-AI is an Agentic AI-powered multimodal teaching assistant that helps educ
 
 ## Demo
 
-<!-- Demo video will be added here -->
+[▶ Watch Searchy Demo](https://github.com/user-attachments/assets/02acaae1-fc4b-4727-b5c5-54ff3c43043b)
+
+A local recording of the demonstration is also available at [`assets/demo/demo.mp4`](assets/demo/demo.mp4).
+
+### Example Documents for Testing
+
+Ready-to-use multimodal test files covering Gradient Descent optimization are provided in the [`exemple/`](exemple/) directory:
+
+| File | Format | Multimodal & Evaluation Capabilities |
+| :--- | :--- | :--- |
+| [`SGD_Visual_Deep_Dive.pdf`](exemple/SGD_Visual_Deep_Dive.pdf) | **PDF** | High-resolution embedded loss contour and learning rate diagrams for VLM testing, structured comparison tables, and numerical verification checkpoints. |
+| [`Gradient_Descent_Variants_DeepDive.docx`](exemple/Gradient_Descent_Variants_DeepDive.docx) | **DOCX** | Full technical guide with embedded figures, styled tables, mathematical derivations (Adam, RMSprop, Momentum), and cross-references. |
+| [`Gradient_Descent_Quick_Reference.txt`](exemple/Gradient_Descent_Quick_Reference.txt) | **TXT** | Plain-text reference guide with ASCII comparison matrix, step-by-step numerical calculation ($w_0 = 1.00 \to 1.40$), and 5 Q&A flashcards. |
+| [`Stochastic_Gradient_Descent_in_3_Minutes.mp4`](exemple/Stochastic_Gradient_Descent_in_3_Minutes.mp4) | **MP4 Video** | Lecture video testing audio transcription (Whisper) and scene-based frame extraction (VLM). |
 
 ## How It Works
 

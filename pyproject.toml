@@ -3,8 +3,6 @@ name = "wizora-ai"
 version = "1.0.0"
 description = "Wizora-AI backend for educational agents and document processing."
 requires-python = ">=3.11,<3.12"
-license = "BSD-2-Clause"
-license-files = ["LICENSE"]
 dependencies = [
     "aiosqlite==0.21.0",
     "anyio==4.15.1",

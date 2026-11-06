@@ -1,0 +1,131 @@
+================================================================================
+WIZORA-AI DEMONSTRATION SUITE: GRADIENT DESCENT QUICK REFERENCE GUIDE
+Document Type: Plain Text Reference & Worked Examples (TXT)
+Module: Machine Learning Optimization, Convergence Theory, and Verification Checks
+================================================================================
+
+1. EXECUTIVE OVERVIEW & CORE DEFINITIONS
+--------------------------------------------------------------------------------
+Optimization in machine learning is the process of adjusting model parameters θ 
+to minimize an empirical cost or loss function J(θ).
+
+Fundamental Update Equation:
+    θ_{t+1} = θ_t - η * ∇J(θ_t)
+
+Where:
+    - θ_t    : Current parameter vector (weights and biases) at iteration t
+    - η      : Learning rate (step size multiplier, typically 0.001 to 0.1)
+    - ∇J(θ_t): Gradient vector containing partial derivatives ∂J / ∂θ_j
+    - θ_{t+1}: Updated parameter vector for the subsequent iteration
+
+Gradient Property:
+    The gradient ∇J points in the direction of greatest rate of increase of J(θ).
+    Therefore, subtracting η * ∇J moves parameters in the direction of steepest descent.
+
+
+2. COMPARATIVE TAXONOMY: THE THREE GRADIENT DESCENT REGIMES
+--------------------------------------------------------------------------------
++-------------------+--------------------+--------------------+--------------------+
+| Property          | Batch GD (BGD)     | Stochastic GD (SGD)| Mini-batch GD      |
++-------------------+--------------------+--------------------+--------------------+
+| Sample Size (B)   | N (Full dataset)   | 1 (Single sample)  | 32 to 256 samples  |
+| Cost per Step     | O(N * d)           | O(d)               | O(B * d)           |
+| Update Frequency  | Once per epoch     | N times per epoch  | N/B times per epoch|
+| Loss Trajectory   | Monotonic & smooth | Noisy & erratic    | Moderately smooth  |
+| Memory Footprint  | High (all data)    | Minimal (1 sample) | Fits GPU VRAM      |
+| Saddle Point Risk | Easily trapped     | Escapes via noise  | Balanced escape    |
+| Hardware Speed    | Poor streaming     | Low GPU efficiency | Ideal SIMD speed   |
++-------------------+--------------------+--------------------+--------------------+
+
+Key Theoretical Insight:
+    Why does classical SGD work despite noisy gradients?
+    Because the expected value of a randomly selected sample's gradient equals 
+    the full true gradient:
+        E[ ∇L_i(θ) ] = ∇J(θ)
+    Hence, the single-sample gradient is an UNBIASED ESTIMATOR of the full gradient.
+    The stochastic noise acts as an implicit regularizer, preventing the model 
+    from getting trapped in shallow suboptimal local minima.
+
+
+3. CONCRETE WORKED NUMERICAL EXAMPLE (STEP-BY-STEP CALCULATION)
+--------------------------------------------------------------------------------
+Consider a single-weight linear model without bias:
+    Prediction Model:   y_hat = w * x
+    Loss Function:      L = 0.5 * (y_hat - y)^2
+    Gradient w.r.t w:   dL / dw = (y_hat - y) * x
+
+Initial Parameters:
+    Initial weight:     w_0 = 1.00
+    Learning rate:      η   = 0.10
+    Training sample:    x   = 2.0
+    Target true label:  y   = 4.0
+
+Step 1: Compute Model Prediction
+    y_hat = w_0 * x = 1.00 * 2.0 = 2.00
+
+Step 2: Compute Residual Error
+    Error = y_hat - y = 2.00 - 4.00 = -2.00
+
+Step 3: Evaluate Loss Gradient
+    dL / dw = (y_hat - y) * x = (-2.00) * 2.0 = -4.00
+
+Step 4: Execute Parameter Update
+    w_1 = w_0 - η * (dL / dw)
+    w_1 = 1.00 - (0.10 * -4.00)
+    w_1 = 1.00 + 0.40
+    w_1 = 1.40 (EXACT VALUE)
+
+Verification Checkpoint:
+    After one step of SGD with η=0.10, the weight updates from 1.00 to 1.40.
+
+
+4. MODERN ADAPTIVE OPTIMIZERS SUMMARY
+--------------------------------------------------------------------------------
+1. SGD with Momentum:
+   - Maintains a velocity vector v_t that accumulates past gradients:
+       v_{t+1} = β * v_t + η * ∇L(θ_t)
+       θ_{t+1} = θ_t - v_{t+1}
+   - Standard momentum coefficient: β = 0.90.
+   - Dampens cross-ravine oscillations and accelerates along consistent slopes.
+
+2. RMSprop:
+   - Normalizes gradient steps by dividing by the moving root-mean-square of past gradients:
+       s_t = γ * s_{t-1} + (1 - γ) * (∇L_t)^2
+       θ_{t+1} = θ_t - (η / √(s_t + ε)) * ∇L_t
+
+3. Adam (Adaptive Moment Estimation):
+   - Combines first-moment tracking (Momentum) and second-moment tracking (RMSprop).
+   - Includes bias-correction formulas:
+       m_hat = m_t / (1 - β_1^t)
+       v_hat = v_t / (1 - β_2^t)
+       θ_{t+1} = θ_t - (η / √(v_hat + ε)) * m_hat
+
+
+5. VERIFICATION TARGETS & FLASHCARDS FOR WIZORA-AI DEMO
+--------------------------------------------------------------------------------
+Question 1: What is the sample size used in classical Stochastic Gradient Descent?
+Answer: Exactly one single sample (Batch size B = 1).
+
+Question 2: Why is the SGD gradient called an unbiased estimator?
+Answer: Because the mathematical expectation of the single-sample gradient equals 
+the true gradient evaluated across the entire dataset: E[∇L_i(θ)] = ∇J(θ).
+
+Question 3: How does the convergence path of Batch GD differ from Stochastic GD?
+Answer: Batch GD follows a smooth, direct, monotonic path perpendicular to loss contours, 
+whereas SGD exhibits an erratic zigzag trajectory due to high sample variance.
+
+Question 4: What is the primary advantage of Mini-batch Gradient Descent over SGD?
+Answer: Mini-batch GD allows efficient hardware parallelization (SIMD / GPU tensor cores) 
+while retaining sufficient stochastic noise to escape saddle points.
+
+Question 5: What is the purpose of the momentum parameter in SGD?
+Answer: Momentum dampens oscillations in high-curvature dimensions (orthogonal to the valley) 
+and accelerates parameter updates along flat ravines.
+
+
+6. MULTI-DOCUMENT CROSS-REFERENCE GUIDE
+--------------------------------------------------------------------------------
+- Visual Contours: See Figure 1 and Figure 2 in "SGD_Visual_Deep_Dive.pdf".
+- Detailed Derivations & Code: See Section 3 in "Gradient_Descent_Variants_DeepDive.docx".
+- Video Explanation: See "Stochastic_Gradient_Descent_in_3_Minutes.mp4".
+================================================================================

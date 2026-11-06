@@ -14,7 +14,7 @@ EmbeddingProvider = Literal["LOCAL_EMBEDDING", "HUGGINGFACE"]
 
 class Settings(BaseSettings):
     # API keys and tokens
-    LLM_PROVIDER: LLMProvider = "OPENAI_COMPATIBLE"
+    LLM_PROVIDER: LLMProvider = "NVIDIA_NIM"
     OPENAI_COMPATIBLE_API_KEY: SecretStr | None = None
     OPENAI_COMPATIBLE_BASE_URL: str = "https://api.openai.com/v1"
     OPENAI_COMPATIBLE_MODEL_ID: ModelName = "gpt-4o-mini"
@@ -89,7 +89,7 @@ class Settings(BaseSettings):
     PROVIDER_FALLBACK_PROVIDER: LLMProvider | None = None
     PROVIDER_FALLBACK_MODEL_ID: ModelName | None = None
     OLLAMA_NUM_CTX: int = Field(default=16384, ge=2048, le=131072)
-    GRAPH_TIMEOUT_SECONDS: float = Field(default=180, gt=0, allow_inf_nan=False)
+    GRAPH_TIMEOUT_SECONDS: float = Field(default=600, gt=0, allow_inf_nan=False)
     # None preserves the existing source-coverage, deficit and request deadlines.
     QUESTION_CANDIDATE_ATTEMPT_LIMIT: int | None = Field(default=None, ge=1, le=256)
     QUESTION_BATCH_RETRY_LIMIT: int | None = Field(default=None, ge=0, le=20)
@@ -110,7 +110,7 @@ class Settings(BaseSettings):
     CHECKPOINT_DATABASE: str = "runtime/checkpoints.sqlite"
     LOG_LEVEL: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "INFO"
     SESSION_RETENTION_DAYS: int = Field(default=0, ge=0, le=3650)
-    SESSION_LEASE_SECONDS: float = Field(default=210, gt=0, allow_inf_nan=False)
+    SESSION_LEASE_SECONDS: float = Field(default=720, gt=0, allow_inf_nan=False)
     MAX_UPLOAD_BYTES: int = Field(default=268435456, ge=1024, le=2147483648)
     MAX_BATCH_FILES: int = Field(default=32, ge=1, le=128)
     MAX_BATCH_BYTES: int = Field(default=1073741824, ge=1024, le=8589934592)
