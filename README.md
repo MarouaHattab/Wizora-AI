@@ -13,7 +13,7 @@ Wizora-AI is an Agentic AI-powered multimodal teaching assistant that helps educ
 
 ## Demo
 
-[▶ Watch Searchy Demo](https://github.com/user-attachments/assets/02acaae1-fc4b-4727-b5c5-54ff3c43043b)
+[▶ Watch Searchy Demo](https://github.com/user-attachments/assets/2d81e032-08da-4d1c-89bd-15a7557f5188)
 
 ## How It Works
 
